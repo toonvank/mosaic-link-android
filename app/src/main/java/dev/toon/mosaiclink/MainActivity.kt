@@ -423,7 +423,14 @@ private fun WatchfaceCard(
                             overflow = TextOverflow.Ellipsis,
                         )
                         Spacer(Modifier.height(6.dp))
-                        StatusPill("Compatible", true)
+                        StatusPill(
+                            if (face.warnings.isEmpty()) {
+                                "Compatible"
+                            } else {
+                                "Compatible • ${face.warnings.size} notes"
+                            },
+                            true,
+                        )
                         Spacer(Modifier.height(8.dp))
                         Text(
                             "${face.fileCount} files • stock binary preserved",
@@ -435,6 +442,15 @@ private fun WatchfaceCard(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
+                        face.warnings.firstOrNull()?.let { warning ->
+                            Text(
+                                warning,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.tertiary,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                     }
                 }
             } ?: run {

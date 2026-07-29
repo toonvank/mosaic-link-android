@@ -18,8 +18,17 @@ data class Clock2Layer(
     val fontSize: Float,
     val clockwise: Boolean,
     val contentMode: String = "fit",
+    val isHeader: Boolean = false,
+    val dateCustomFormat: String = "",
+    val imageStripTimeWindow: String = "",
+    val imageStripHorizontal: Boolean = false,
+    val imageStripFrames: Int = 0,
+    val shapeType: String = "",
+    val cornerRadius: Float = 0f,
+    val outlineWidth: Float = 0f,
+    val outlineColor: String = "#FFFFFFFF",
 ) {
-    val active: Boolean get() = !hidden && alpha > 0f
+    val active: Boolean get() = !hidden && !isHeader && alpha > 0f
 }
 
 data class Clock2Document(
@@ -44,6 +53,7 @@ data class Clock2Requirements(
 data class Compatibility(
     val supported: Boolean,
     val reasons: List<String>,
+    val warnings: List<String>,
     val requirements: Clock2Requirements,
 )
 
@@ -54,4 +64,5 @@ data class BuiltWatchface(
     val sourceSha256: String,
     val packageSha256: String,
     val fileCount: Int,
+    val warnings: List<String>,
 )

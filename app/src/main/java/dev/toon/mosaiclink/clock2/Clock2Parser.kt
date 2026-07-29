@@ -54,7 +54,11 @@ object Clock2Parser {
                 ?: throw IllegalArgumentException("Layer $index is not an object")
             val image = raw.optJSONObject("imageLayerSetting")
             val filename = image?.optString("filename").orEmpty()
-            val encoded = image?.optString("imageData").orEmpty()
+            val encoded = if (image == null || image.isNull("imageData")) {
+                ""
+            } else {
+                image.optString("imageData")
+            }
             val data = if (encoded.isBlank()) {
                 null
             } else {
@@ -74,6 +78,8 @@ object Clock2Parser {
             val hand = raw.optJSONObject("handLayerSetting")
             val date = raw.optJSONObject("dateLayerSetting")
             val text = raw.optJSONObject("textLayerSetting")
+            val imageStrip = raw.optJSONObject("imageStripLayerSetting")
+            val shape = raw.optJSONObject("shapeLayerSetting")
             val filename = image?.optString("filename").orEmpty()
             Clock2Layer(
                 index = index,
@@ -96,6 +102,16 @@ object Clock2Parser {
                 fontSize = text?.optDouble("ptSize", 20.0)?.toFloat() ?: 20f,
                 clockwise = hand?.optBoolean("clockwiseRotation", true) ?: true,
                 contentMode = image?.optString("contentMode", "fit") ?: "fit",
+                isHeader = raw.optBoolean("isHeader", false),
+                dateCustomFormat = date?.optString("customFormat").orEmpty(),
+                imageStripTimeWindow = imageStrip?.optString("timeWindowType").orEmpty(),
+                imageStripHorizontal = imageStrip?.optBoolean("horizInput", false) ?: false,
+                imageStripFrames = imageStrip?.optInt("framesForAnimation", 0) ?: 0,
+                shapeType = shape?.optString("shapeType").orEmpty(),
+                cornerRadius = shape?.optDouble("cornerRadius", 0.0)?.toFloat() ?: 0f,
+                outlineWidth = shape?.optDouble("outlineWidth", 0.0)?.toFloat() ?: 0f,
+                outlineColor = shape?.optString("outlineColorHex", "#FFFFFFFF")
+                    ?: "#FFFFFFFF",
             )
         }
 
@@ -111,6 +127,7 @@ object Clock2Parser {
 
     fun compatibility(document: Clock2Document): Compatibility {
         val reasons = mutableListOf<String>()
+        val warnings = linkedSetOf<String>()
         val active = document.activeLayers
         active.forEach { layer ->
             when (layer.type) {
@@ -118,19 +135,48 @@ object Clock2Parser {
                     reasons += "Layer ${layer.index}: image asset is missing"
                 }
                 "hand" -> {
-                    if (layer.kind !in setOf(
+                    if (layer.imageData == null) {
+                        reasons += "Layer ${layer.index}: hand asset is missing"
+                    } else if (layer.kind !in setOf(
                             "twelveHours", "minute", "seconds",
                             "twentyFourhours", "battery",
                         )
-                    ) reasons += "Layer ${layer.index}: unsupported hand ${layer.kind}"
-                    if (layer.imageData == null) {
-                        reasons += "Layer ${layer.index}: hand asset is missing"
+                    ) {
+                        warnings += "Unsupported data hands are frozen at their zero position"
                     }
                 }
-                "date" -> if (layer.dateFormat !in setOf("D", "DD", "DAuto", "DDAuto")) {
-                    reasons += "Layer ${layer.index}: unsupported date format"
+                "date" -> {
+                    if (layer.dateFormat.isBlank() && layer.dateCustomFormat.isBlank()) {
+                        reasons += "Layer ${layer.index}: date format is missing"
+                    } else if (layer.dateFormat !in setOf(
+                            "D", "DD", "DAuto", "DDAuto", "DA", "DADD",
+                            "M", "MM", "ML", "MMM", "MMMM",
+                        )
+                    ) {
+                        warnings += "Unknown date formats are approximated in the static background"
+                    }
+                    warnings += "Date layers show the value from installation time"
                 }
-                else -> reasons += "Layer ${layer.index}: unsupported type ${layer.type}"
+                "imageStrip" -> {
+                    if (layer.imageData == null) {
+                        reasons += "Layer ${layer.index}: image strip asset is missing"
+                    } else {
+                        warnings += "Image strips show the frame from installation time"
+                    }
+                }
+                "video" -> {
+                    if (layer.imageData == null) {
+                        reasons += "Layer ${layer.index}: video asset is missing"
+                    } else {
+                        warnings += "Video layers use a still first frame"
+                    }
+                }
+                "shape" -> Unit
+                "text" -> warnings += "Visible text layers without raster assets are omitted"
+                "icon", "dataLabel", "weather", "dataRing", "dataBar", "time",
+                "calendar", "chart", "ring", "button", "homeKit" ->
+                    warnings += "Live sensor, weather, and digital data layers are omitted"
+                else -> warnings += "Unknown layer types are omitted"
             }
         }
 
@@ -167,12 +213,22 @@ object Clock2Parser {
             .filter { round3(it.x) == 0 && round3(it.y) == 0 }
             .groupingBy { it.kind }
             .eachCount()
-        listOf("twelveHours", "minute", "seconds").forEach { kind ->
+        listOf("twelveHours", "minute").forEach { kind ->
             if (centralHands[kind] != 1) {
                 reasons += "Exactly one central $kind hand is required"
             }
         }
-        return Compatibility(reasons.isEmpty(), reasons, requirements)
+        if ((centralHands["seconds"] ?: 0) > 1) {
+            reasons += "At most one central seconds hand is supported"
+        } else if (centralHands["seconds"] == null) {
+            warnings += "The missing central seconds hand will be transparent"
+        }
+        return Compatibility(
+            supported = reasons.isEmpty(),
+            reasons = reasons,
+            warnings = warnings.toList(),
+            requirements = requirements,
+        )
     }
 
     private fun round3(value: Float): Int = (value * 1000f).toInt()

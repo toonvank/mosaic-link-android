@@ -10,6 +10,8 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.media.MediaDataSource
+import android.media.MediaMetadataRetriever
 import com.sifli.ezip.sifliEzipUtil
 import org.json.JSONArray
 import org.json.JSONObject
@@ -18,6 +20,8 @@ import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
@@ -96,12 +100,13 @@ class WatchfaceBuilder(private val context: Context) {
         val mainLayers = document.activeLayers
             .filter(::isMainHand)
             .associateBy { it.kind }
-        check(mainLayers.keys.containsAll(HAND_SPECS.keys)) {
-            "Compatible face is missing a central hand"
+        check(mainLayers.keys.containsAll(setOf("twelveHours", "minute"))) {
+            "Compatible face is missing a central hour or minute hand"
         }
         val hands = linkedMapOf<String, Bitmap>()
         HAND_SPECS.forEach { (kind, spec) ->
-            val hand = fitHand(document, requireNotNull(mainLayers[kind]), spec)
+            val hand = mainLayers[kind]?.let { fitHand(document, it, spec) }
+                ?: Bitmap.createBitmap(spec.width, spec.height, Bitmap.Config.ARGB_8888)
             hands[kind] = hand
             files["ex/resource/$MODULE/${spec.filename}"] = rawResource(hand)
         }
@@ -155,6 +160,7 @@ class WatchfaceBuilder(private val context: Context) {
             sourceSha256 = document.sourceSha256,
             packageSha256 = packageBytes.sha256(),
             fileCount = files.size,
+            warnings = compatibility.warnings,
         )
     }
 
@@ -175,19 +181,17 @@ class WatchfaceBuilder(private val context: Context) {
         // Capture all asset keys before BitmapFactory sees any buffers. Clock2
         // uses the filename as its deduplication/reference identity.
         val cacheKeys = document.activeLayers
-            .filter { it.type != "date" && !isMainHand(it) }
-            .associate { it.index to layerCacheKey(document, it) }
+            .filter(::isRasterLayer)
+            .filterNot(::isMainHand)
+            .associate { it.index to layerCacheKey(document, it, instant) }
         val decodedImages = mutableMapOf<String, Bitmap>()
         try {
             document.activeLayers.filterNot(::isMainHand).forEach { layer ->
                 val x = centerX + layer.x * xScale
                 val y = centerY + layer.y * yScale
-                if (layer.type == "date") {
-                    val text = if (layer.dateFormat in setOf("D", "DAuto")) {
-                        instant.dayOfMonth.toString()
-                    } else {
-                        "%02d".format(instant.dayOfMonth)
-                    }
+                when (layer.type) {
+                    "date" -> {
+                    val text = formatDate(layer, instant)
                     val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
                         color = parseColor(layer.color)
                         textSize = max(1f, layer.fontSize * yScale)
@@ -197,10 +201,12 @@ class WatchfaceBuilder(private val context: Context) {
                     }
                     val baseline = y - (paint.ascent() + paint.descent()) / 2f
                     canvas.drawText(text, x, baseline, paint)
-                } else {
+                    }
+                    "shape" -> drawShape(canvas, layer, x, y, xScale, yScale)
+                    "image", "imageStrip", "video", "hand" -> {
                     val key = requireNotNull(cacheKeys[layer.index])
                     val source = decodedImages.getOrPut(key) {
-                        layerBitmap(document, layer)
+                        layerBitmap(document, layer, instant)
                     }
                     var image = source
                     if (layer.type == "hand") {
@@ -215,6 +221,8 @@ class WatchfaceBuilder(private val context: Context) {
                     }
                     canvas.drawBitmap(image, x - image.width / 2f, y - image.height / 2f, paint)
                     if (image !== source) image.recycle()
+                    }
+                    else -> Unit
                 }
             }
         } finally {
@@ -292,12 +300,22 @@ class WatchfaceBuilder(private val context: Context) {
         return output
     }
 
-    private fun layerBitmap(document: Clock2Document, layer: Clock2Layer): Bitmap {
+    private fun layerBitmap(
+        document: Clock2Document,
+        layer: Clock2Layer,
+        instant: ZonedDateTime? = null,
+    ): Bitmap {
         val bytes = requireNotNull(layer.imageData) {
             "Layer ${layer.index} has no embedded image"
         }
         val targetWidth = max(1, (layer.width * xScale(document)).roundToInt())
         val targetHeight = max(1, (layer.height * yScale(document)).roundToInt())
+        if (layer.type == "video") {
+            val source = videoFrame(bytes, layer.index)
+            val scaled = placeInFrame(source, targetWidth, targetHeight, layer.contentMode)
+            source.recycle()
+            return scaled
+        }
         val dimensions = imageDimensions(bytes)
         check(dimensions.first > 0 && dimensions.second > 0) {
             "Layer ${layer.index} image has invalid dimensions"
@@ -317,22 +335,36 @@ class WatchfaceBuilder(private val context: Context) {
         // Clock2 intentionally reuses the same ByteArray for deduplicated assets,
         // so always give the decoder a disposable copy.
         val decodeBytes = bytes.copyOf()
-        val source = BitmapFactory.decodeByteArray(
+        var source = BitmapFactory.decodeByteArray(
             decodeBytes, 0, decodeBytes.size, options,
         )
             ?: error("Layer ${layer.index} image could not be decoded")
+        if (layer.type == "imageStrip") {
+            val frame = imageStripFrame(
+                source,
+                layer,
+                requireNotNull(instant) { "Image strips require an installation time" },
+            )
+            source.recycle()
+            source = frame
+        }
         val scaled = placeInFrame(source, targetWidth, targetHeight, layer.contentMode)
         source.recycle()
         return scaled
     }
 
-    private fun layerCacheKey(document: Clock2Document, layer: Clock2Layer): String {
+    private fun layerCacheKey(
+        document: Clock2Document,
+        layer: Clock2Layer,
+        instant: ZonedDateTime,
+    ): String {
         val targetWidth = max(1, (layer.width * xScale(document)).roundToInt())
         val targetHeight = max(1, (layer.height * yScale(document)).roundToInt())
         val assetIdentity = layer.imageFilename.ifBlank {
             System.identityHashCode(requireNotNull(layer.imageData)).toString()
         }
-        return "$assetIdentity:$targetWidth:$targetHeight:${layer.contentMode}"
+        val frame = if (layer.type == "imageStrip") imageStripIndex(layer, instant) else -1
+        return "$assetIdentity:$targetWidth:$targetHeight:${layer.contentMode}:$frame"
     }
 
     private fun placeInFrame(
@@ -381,6 +413,111 @@ class WatchfaceBuilder(private val context: Context) {
             )
         }
         return output
+    }
+
+    private fun imageStripFrame(
+        source: Bitmap,
+        layer: Clock2Layer,
+        instant: ZonedDateTime,
+    ): Bitmap {
+        val count = imageStripCount(layer)
+        check(count > 0) { "Layer ${layer.index} has no usable image-strip frames" }
+        val index = imageStripIndex(layer, instant).coerceIn(0, count - 1)
+        return if (layer.imageStripHorizontal) {
+            check(source.width % count == 0) {
+                "Layer ${layer.index} image strip width does not match $count frames"
+            }
+            val frameWidth = source.width / count
+            Bitmap.createBitmap(source, index * frameWidth, 0, frameWidth, source.height)
+        } else {
+            check(source.height % count == 0) {
+                "Layer ${layer.index} image strip height does not match $count frames"
+            }
+            val frameHeight = source.height / count
+            Bitmap.createBitmap(source, 0, index * frameHeight, source.width, frameHeight)
+        }
+    }
+
+    private fun imageStripCount(layer: Clock2Layer): Int =
+        when (layer.imageStripTimeWindow.lowercase(Locale.ROOT)) {
+            "dayofmonth" -> 31
+            "month", "monthofyear" -> 12
+            "dayofweek", "weekday" -> 7
+            "hourofday", "hour" -> 24
+            "minuteofhour", "minute", "secondofminute", "second" -> 60
+            else -> layer.imageStripFrames
+        }
+
+    private fun imageStripIndex(layer: Clock2Layer, instant: ZonedDateTime): Int =
+        when (layer.imageStripTimeWindow.lowercase(Locale.ROOT)) {
+            "dayofmonth" -> instant.dayOfMonth - 1
+            "month", "monthofyear" -> instant.monthValue - 1
+            "dayofweek", "weekday" -> instant.dayOfWeek.value % 7
+            "hourofday", "hour" -> instant.hour
+            "minuteofhour", "minute" -> instant.minute
+            "secondofminute", "second" -> instant.second
+            else -> 0
+        }
+
+    private fun videoFrame(bytes: ByteArray, layerIndex: Int): Bitmap {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(ByteArrayMediaSource(bytes))
+            retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                ?: error("Layer $layerIndex video has no decodable frame")
+        } catch (error: Exception) {
+            throw IllegalArgumentException("Layer $layerIndex video could not be decoded", error)
+        } finally {
+            retriever.release()
+        }
+    }
+
+    private fun drawShape(
+        canvas: Canvas,
+        layer: Clock2Layer,
+        x: Float,
+        y: Float,
+        xScale: Float,
+        yScale: Float,
+    ) {
+        val width = max(1f, layer.width * xScale)
+        val height = max(1f, layer.height * yScale)
+        val rect = RectF(x - width / 2f, y - height / 2f, x + width / 2f, y + height / 2f)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = parseColor(
+                if (layer.outlineWidth > 0f) layer.outlineColor else layer.color,
+            )
+            alpha = (layer.alpha * 255).roundToInt().coerceIn(0, 255)
+            style = if (layer.outlineWidth > 0f) Paint.Style.STROKE else Paint.Style.FILL
+            strokeWidth = max(1f, layer.outlineWidth * min(xScale, yScale))
+        }
+        when (layer.shapeType.lowercase(Locale.ROOT)) {
+            "circle", "ellipse" -> canvas.drawOval(rect, paint)
+            else -> {
+                val radius = max(0f, layer.cornerRadius * min(xScale, yScale))
+                canvas.drawRoundRect(rect, radius, radius, paint)
+            }
+        }
+    }
+
+    private fun formatDate(layer: Clock2Layer, instant: ZonedDateTime): String {
+        if (layer.dateCustomFormat.isNotBlank()) {
+            runCatching {
+                return instant.format(DateTimeFormatter.ofPattern(layer.dateCustomFormat))
+            }
+        }
+        val pattern = when (layer.dateFormat) {
+            "D", "DAuto" -> "d"
+            "DD", "DDAuto" -> "dd"
+            "DA" -> "EEE"
+            "DADD" -> "EEE dd"
+            "M" -> "M"
+            "MM" -> "MM"
+            "ML", "MMMM" -> "MMMM"
+            "MMM" -> "MMM"
+            else -> "d"
+        }
+        return instant.format(DateTimeFormatter.ofPattern(pattern))
     }
 
     private fun imageDimensions(bytes: ByteArray): Pair<Int, Int> {
@@ -530,8 +667,14 @@ class WatchfaceBuilder(private val context: Context) {
     private fun yScale(document: Clock2Document): Float =
         VIEWPORT_HEIGHT / document.canvasHeight
 
+    private fun isRasterLayer(layer: Clock2Layer): Boolean =
+        layer.type in setOf("image", "imageStrip", "video", "hand")
+
     private fun isMainHand(layer: Clock2Layer): Boolean =
-        layer.type == "hand" && layer.kind in HAND_SPECS && layer.x == 0f && layer.y == 0f
+        layer.type == "hand" &&
+            layer.kind in HAND_SPECS &&
+            (layer.x * 1000f).toInt() == 0 &&
+            (layer.y * 1000f).toInt() == 0
 
     private fun handAngle(kind: String, time: ZonedDateTime, battery: Int): Float =
         when (kind) {
@@ -541,7 +684,7 @@ class WatchfaceBuilder(private val context: Context) {
             "seconds" -> time.second * 6f + time.nano / 1_000_000_000f * 6f
             "twentyFourhours" -> (time.hour + time.minute / 60f) * 15f
             "battery" -> battery.coerceIn(0, 100) * 3.6f
-            else -> error("Unsupported hand $kind")
+            else -> 0f
         }
 
     private fun parseColor(value: String): Int = runCatching {
@@ -556,6 +699,19 @@ class WatchfaceBuilder(private val context: Context) {
             Color.parseColor(value)
         }
     }.getOrDefault(Color.WHITE)
+}
+
+private class ByteArrayMediaSource(private val bytes: ByteArray) : MediaDataSource() {
+    override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
+        if (position >= bytes.size) return -1
+        val count = minOf(size, bytes.size - position.toInt())
+        bytes.copyInto(buffer, offset, position.toInt(), position.toInt() + count)
+        return count
+    }
+
+    override fun getSize(): Long = bytes.size.toLong()
+
+    override fun close() = Unit
 }
 
 internal object Crc32Mpeg2 {

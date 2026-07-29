@@ -90,16 +90,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         bytes: ByteArray,
         persist: Boolean,
     ) {
-        if (persist) {
-            withContext(Dispatchers.IO) {
-                File(getApplication<Application>().filesDir, LAST_CLOCK2)
-                    .writeBytes(bytes)
-                getApplication<Application>().getSharedPreferences(PREFS, 0)
-                    .edit()
-                    .putString(LAST_FILE_NAME, fileName)
-                    .apply()
-            }
-        }
         updatePhase("Checking layer topology…")
         val document = withContext(Dispatchers.Default) {
             Clock2Parser.parse(bytes, fileName)
@@ -122,8 +112,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val built = withContext(Dispatchers.Default) {
             builder.build(document, ZonedDateTime.now(), 73)
         }
+        if (persist) {
+            withContext(Dispatchers.IO) {
+                File(getApplication<Application>().filesDir, LAST_CLOCK2)
+                    .writeBytes(bytes)
+                getApplication<Application>().getSharedPreferences(PREFS, 0)
+                    .edit()
+                    .putString(LAST_FILE_NAME, fileName)
+                    .apply()
+            }
+        }
         mutableState.update { it.copy(builtFace = built) }
-        log("Built ${built.displayName}: ${built.fileCount} verified files")
+        log(
+            if (built.warnings.isEmpty()) {
+                "Built ${built.displayName}: ${built.fileCount} verified files"
+            } else {
+                "Built ${built.displayName}: ${built.warnings.size} conversion notes"
+            },
+        )
     }
 
     fun connect() {

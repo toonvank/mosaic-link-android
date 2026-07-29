@@ -28,6 +28,24 @@ This is not currently compatible with every watch sold as “HK8,” every HK8
 PRO MAX revision, or arbitrary SiFli watches. Treat any other equipment code
 or firmware as unsupported until its stock module and protocol are verified.
 
+## Clock2 conversion behavior
+
+Mosaic Link keeps the stock module safe by turning Clock2 content into a
+verified static background plus the central live hour, minute, and optional
+seconds hands.
+
+- Images, common date formats, shapes, and secondary hands are flattened.
+- Image strips select the frame for the installation time.
+- Videos use a still first frame; video animation is not transferred.
+- Clock2 group headers are metadata and are ignored.
+- Weather, sensor, and unsupported digital data layers are omitted and shown
+  as conversion notes in the preview.
+- A rejected or failed file never replaces the last successfully built file.
+
+This is intentionally honest about partial conversion: “compatible with
+notes” means the generated package is structurally safe, not that unavailable
+Apple Watch services have become live HK8 complications.
+
 ## Safety boundary
 
 - A selected `.clock2` file is inspected before conversion. The current
