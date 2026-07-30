@@ -39,11 +39,12 @@ class WatchfaceBuilder(private val context: Context) {
     )
 
     companion object {
-        const val VIEWPORT_WIDTH = 410
-        const val VIEWPORT_HEIGHT = 494
+        const val VIEWPORT_WIDTH = 485
+        const val VIEWPORT_HEIGHT = 520
         const val PANEL_WIDTH = 485
         const val PANEL_HEIGHT = 520
         private const val MODULE = "wf_clock23"
+        private const val MODULE_PATH = "ex/installer_wf/wf_clock23.so"
         private const val DONOR_ASSET = "stock_wf_clock23.zip"
         private const val DONOR_SHA =
             "bff011a4d1afbc717937169cbb23b86cb6952049090e3d3a475a0555f780ad49"
@@ -56,7 +57,7 @@ class WatchfaceBuilder(private val context: Context) {
         private val PINNED_HASHES = mapOf(
             "ex/installer_wf/wf_clock23.dsc" to
                 "bedc3c3d720ad54d6cbc0c5fa65f6d786f9cef36377e562f184603ef972e1cd3",
-            "ex/installer_wf/wf_clock23.so" to
+            MODULE_PATH to
                 "989bed6f8955f28ee1bf5b2232ed11846360c1643d35a00215aa9fe34e1b67c3",
             "ex/installer_wf/wf_clock23_res.so" to
                 "8ef72a80dabe96ee24efed7b98aeebeef0499a226c08181976fb9c8589f76148",
@@ -95,6 +96,7 @@ class WatchfaceBuilder(private val context: Context) {
         PINNED_HASHES.forEach { (path, hash) ->
             check(files[path]?.sha256() == hash) { "Pinned stock file changed: $path" }
         }
+        files[MODULE_PATH] = WfClock23FullPanelPatch.apply(files.getValue(MODULE_PATH))
 
         val static = renderStatic(document, instant, battery)
         val mainLayers = document.activeLayers
@@ -125,12 +127,14 @@ class WatchfaceBuilder(private val context: Context) {
         val manifest = JSONObject()
             .put("format", 3)
             .put("builder", "mosaic-link-android")
-            .put("template_id", "clock2-stock-binary-wf_clock23-v3")
+            .put("template_id", "clock2-stock-binary-wf_clock23-full-panel-experiment")
             .put("source_clock2_sha256", document.sourceSha256)
             .put("stock_native_sha256", PINNED_HASHES.getValue(
-                "ex/installer_wf/wf_clock23.so",
+                MODULE_PATH,
             ))
+            .put("output_native_sha256", WfClock23FullPanelPatch.OUTPUT_SHA256)
             .put("modified_paths", JSONArray(listOf(
+                MODULE_PATH,
                 "ex/installer_wf/wf_clock23_tn.bin",
                 "ex/resource/wf_clock23/wf_clock23_bg.bin",
                 "ex/resource/wf_clock23/wf_clock23_h.bin",
@@ -178,12 +182,18 @@ class WatchfaceBuilder(private val context: Context) {
         val yScale = yScale(document)
         val centerX = VIEWPORT_WIDTH / 2f
         val centerY = VIEWPORT_HEIGHT / 2f
+        val primaryBackgroundIndex = document.activeLayers
+            .firstOrNull { it.type == "image" }
+            ?.index
         // Capture all asset keys before BitmapFactory sees any buffers. Clock2
         // uses the filename as its deduplication/reference identity.
         val cacheKeys = document.activeLayers
             .filter(::isRasterLayer)
             .filterNot(::isMainHand)
-            .associate { it.index to layerCacheKey(document, it, instant) }
+            .associate {
+                val stretchToPanel = it.index == primaryBackgroundIndex
+                it.index to layerCacheKey(document, it, instant, stretchToPanel)
+            }
         val decodedImages = mutableMapOf<String, Bitmap>()
         try {
             document.activeLayers.filterNot(::isMainHand).forEach { layer ->
@@ -206,7 +216,12 @@ class WatchfaceBuilder(private val context: Context) {
                     "image", "imageStrip", "video", "hand" -> {
                     val key = requireNotNull(cacheKeys[layer.index])
                     val source = decodedImages.getOrPut(key) {
-                        layerBitmap(document, layer, instant)
+                        layerBitmap(
+                            document,
+                            layer,
+                            instant,
+                            stretchToFrame = layer.index == primaryBackgroundIndex,
+                        )
                     }
                     var image = source
                     if (layer.type == "hand") {
@@ -304,6 +319,7 @@ class WatchfaceBuilder(private val context: Context) {
         document: Clock2Document,
         layer: Clock2Layer,
         instant: ZonedDateTime? = null,
+        stretchToFrame: Boolean = false,
     ): Bitmap {
         val bytes = requireNotNull(layer.imageData) {
             "Layer ${layer.index} has no embedded image"
@@ -348,7 +364,15 @@ class WatchfaceBuilder(private val context: Context) {
             source.recycle()
             source = frame
         }
-        val scaled = placeInFrame(source, targetWidth, targetHeight, layer.contentMode)
+        // A full-screen Clock2 face and this HK8 panel have different aspect
+        // ratios. Stretch only the base artwork so all bezel markings survive;
+        // cover-cropping removes the top/bottom scale, while fitting recreates
+        // the black side bars this full-panel experiment is meant to eliminate.
+        val scaled = if (stretchToFrame) {
+            Bitmap.createScaledBitmap(source, targetWidth, targetHeight, true)
+        } else {
+            placeInFrame(source, targetWidth, targetHeight, layer.contentMode)
+        }
         source.recycle()
         return scaled
     }
@@ -357,6 +381,7 @@ class WatchfaceBuilder(private val context: Context) {
         document: Clock2Document,
         layer: Clock2Layer,
         instant: ZonedDateTime,
+        stretchToFrame: Boolean,
     ): String {
         val targetWidth = max(1, (layer.width * xScale(document)).roundToInt())
         val targetHeight = max(1, (layer.height * yScale(document)).roundToInt())
@@ -364,7 +389,8 @@ class WatchfaceBuilder(private val context: Context) {
             System.identityHashCode(requireNotNull(layer.imageData)).toString()
         }
         val frame = if (layer.type == "imageStrip") imageStripIndex(layer, instant) else -1
-        return "$assetIdentity:$targetWidth:$targetHeight:${layer.contentMode}:$frame"
+        return "$assetIdentity:$targetWidth:$targetHeight:${layer.contentMode}:$frame:" +
+            stretchToFrame
     }
 
     private fun placeInFrame(
@@ -600,7 +626,12 @@ class WatchfaceBuilder(private val context: Context) {
             )
         }
         PINNED_HASHES.forEach { (path, hash) ->
-            check(files[path]?.sha256() == hash) { "Pinned byte changed: $path" }
+            val expected = if (path == MODULE_PATH) {
+                WfClock23FullPanelPatch.OUTPUT_SHA256
+            } else {
+                hash
+            }
+            check(files[path]?.sha256() == expected) { "Pinned byte changed: $path" }
         }
     }
 

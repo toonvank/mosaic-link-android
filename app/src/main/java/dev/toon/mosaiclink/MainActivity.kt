@@ -178,7 +178,9 @@ private fun MosaicLinkScreen(
                 Text(
                     "On the watch, select a different official stock face and leave " +
                         "the screen awake. Also close Wearfit so it does not compete " +
-                        "for the Bluetooth connection.",
+                        "for the Bluetooth connection.\n\nThis local experiment patches " +
+                        "the official face-23 display geometry to 485×520. Keep the " +
+                        "known-good stock face available for recovery.",
                 )
             },
             confirmButton = {
@@ -433,12 +435,12 @@ private fun WatchfaceCard(
                         )
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            "${face.fileCount} files • stock binary preserved",
+                            "${face.fileCount} files • full-panel geometry patch",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Text(
-                            "Target: stock face 23 • verified",
+                            "Target: stock face 23 • local experiment",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

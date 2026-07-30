@@ -13,13 +13,33 @@ connection attempts. Opening the app does not connect automatically.
 The app is a separate project from `clock2_hk8`. It does not modify the
 Obsidian research vault.
 
+## Experimental full-panel build
+
+This branch produces `0.2.0-experimental.1`, a deliberately separate test
+build. It changes the known official `wf_clock23` module only at its four
+display-geometry values:
+
+- root viewport: 410 × 494 → 485 × 520;
+- analog center: `(205,247)` → `(242,260)`.
+
+The patch is fail-closed: it starts from the hash-pinned official module,
+requires each original byte sequence to occur exactly once, and pins the
+resulting ELF hash. The full-screen background is widened slightly so it fills
+the physical panel without black side bars or tachymeter cropping.
+
+This has passed offline validation and phone-preview testing only. It has **not
+been activated on a watch**. Treat a boot loop as possible. Keep a different
+official stock face active, close Wearfit, and retain the known-good package
+before testing. Use stable `v0.1.1` for the watch-proven asset-only path.
+
 ## Verified compatibility
 
 - **Input:** Apple Clock2 `.clock2` files, limited to the layer types that the
   compatibility checker accepts. It is not a general Clock2 renderer.
 - **Watch profile:** HK8 PRO MAX, equipment code `6167`, firmware `2.09`, using
   the SiFli BLE service and the official `wf_clock23` donor module.
-- **Display profile:** a 410 × 494 watchface viewport on the 485 × 520 panel.
+- **Stable display profile:** a 410 × 494 watchface viewport on the 485 × 520
+  panel. This experimental branch changes that to a 485 × 520 root.
 - **Physical testing:** verified on one watch. Another watch with the exact
   same model, equipment code, firmware, protocol, and donor module should be
   compatible, but has not yet been physically tested.
@@ -52,8 +72,9 @@ Apple Watch services have become live HK8 complications.
   adapter accepts only layer combinations that can be mapped safely onto the
   proven stock watchface binary; unsupported files are rejected without
   contacting the watch.
-- The official executable, descriptor, resource manager, and center caps are
-  hash-pinned and never modified.
+- Stable `v0.1.1` keeps the official executable, descriptor, resource manager,
+  and center caps hash-pinned and unmodified. This experimental branch applies
+  only its pinned full-panel geometry patch to the executable; see above.
 - The UI requires the user to activate a different official face before an
   install begins.
 - BLE errors stop the transfer; there is no factory-reset feature.
