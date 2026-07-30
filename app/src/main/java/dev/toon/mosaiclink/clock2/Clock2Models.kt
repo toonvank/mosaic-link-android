@@ -65,4 +65,5 @@ data class BuiltWatchface(
     val packageSha256: String,
     val fileCount: Int,
     val warnings: List<String>,
+    val scaleMode: ScaleMode = ScaleMode.STRETCH,
 )

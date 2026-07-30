@@ -39,8 +39,8 @@ class WatchfaceBuilder(private val context: Context) {
     )
 
     companion object {
-        const val VIEWPORT_WIDTH = 485
-        const val VIEWPORT_HEIGHT = 520
+        const val VIEWPORT_WIDTH = 410
+        const val VIEWPORT_HEIGHT = 494
         const val PANEL_WIDTH = 485
         const val PANEL_HEIGHT = 520
         private const val MODULE = "wf_clock23"
@@ -84,11 +84,15 @@ class WatchfaceBuilder(private val context: Context) {
         document: Clock2Document,
         instant: ZonedDateTime = ZonedDateTime.now(),
         battery: Int = 73,
+        scaleMode: ScaleMode = ScaleMode.AUTO,
     ): BuiltWatchface {
         val compatibility = Clock2Parser.compatibility(document)
         require(compatibility.supported) {
             compatibility.reasons.joinToString("; ")
         }
+        val resolvedMode = ScaleModeResolver.resolve(
+            scaleMode, document.canvasWidth, document.canvasHeight,
+        )
         val donor = context.assets.open(DONOR_ASSET).use { it.readBytes() }
         check(donor.sha256() == DONOR_SHA) { "Bundled stock donor hash mismatch" }
         val files = unzip(donor)
@@ -96,9 +100,9 @@ class WatchfaceBuilder(private val context: Context) {
         PINNED_HASHES.forEach { (path, hash) ->
             check(files[path]?.sha256() == hash) { "Pinned stock file changed: $path" }
         }
-        files[MODULE_PATH] = WfClock23FullPanelPatch.apply(files.getValue(MODULE_PATH))
+        files[MODULE_PATH] = files.getValue(MODULE_PATH)
 
-        val static = renderStatic(document, instant, battery)
+        val static = renderStatic(document, instant, battery, resolvedMode)
         val mainLayers = document.activeLayers
             .filter(::isMainHand)
             .associateBy { it.kind }
@@ -127,14 +131,12 @@ class WatchfaceBuilder(private val context: Context) {
         val manifest = JSONObject()
             .put("format", 3)
             .put("builder", "mosaic-link-android")
-            .put("template_id", "clock2-stock-binary-wf_clock23-full-panel-experiment")
+            .put("template_id", "clock2-stock-binary-wf_clock23")
             .put("source_clock2_sha256", document.sourceSha256)
             .put("stock_native_sha256", PINNED_HASHES.getValue(
                 MODULE_PATH,
             ))
-            .put("output_native_sha256", WfClock23FullPanelPatch.OUTPUT_SHA256)
             .put("modified_paths", JSONArray(listOf(
-                MODULE_PATH,
                 "ex/installer_wf/wf_clock23_tn.bin",
                 "ex/resource/wf_clock23/wf_clock23_bg.bin",
                 "ex/resource/wf_clock23/wf_clock23_h.bin",
@@ -165,6 +167,7 @@ class WatchfaceBuilder(private val context: Context) {
             packageSha256 = packageBytes.sha256(),
             fileCount = files.size,
             warnings = compatibility.warnings,
+            scaleMode = resolvedMode,
         )
     }
 
@@ -172,23 +175,29 @@ class WatchfaceBuilder(private val context: Context) {
         document: Clock2Document,
         instant: ZonedDateTime,
         battery: Int,
+        scaleMode: ScaleMode,
     ): Bitmap {
         val output = Bitmap.createBitmap(
             VIEWPORT_WIDTH, VIEWPORT_HEIGHT, Bitmap.Config.ARGB_8888,
         )
         val canvas = Canvas(output)
         canvas.drawColor(Color.BLACK)
-        val xScale = xScale(document)
-        val yScale = yScale(document)
-        val centerX = VIEWPORT_WIDTH / 2f
-        val centerY = VIEWPORT_HEIGHT / 2f
+        val resolved = ScaleModeResolver.resolve(scaleMode, document.canvasWidth, document.canvasHeight)
+        val xScale = xScale(document, resolved)
+        val yScale = yScale(document, resolved)
+        val scaledCanvasW = document.canvasWidth * xScale
+        val scaledCanvasH = document.canvasHeight * yScale
+        val originX = (VIEWPORT_WIDTH - scaledCanvasW) / 2f
+        val originY = (VIEWPORT_HEIGHT - scaledCanvasH) / 2f
+        val centerX = originX + scaledCanvasW / 2f
+        val centerY = originY + scaledCanvasH / 2f
         // Capture all asset keys before BitmapFactory sees any buffers. Clock2
         // uses the filename as its deduplication/reference identity.
         val cacheKeys = document.activeLayers
             .filter(::isRasterLayer)
             .filterNot(::isMainHand)
             .associate {
-                it.index to layerCacheKey(document, it, instant, stretchToFrame = true)
+                it.index to layerCacheKey(document, it, instant, scaleMode)
             }
         val decodedImages = mutableMapOf<String, Bitmap>()
         try {
@@ -208,7 +217,7 @@ class WatchfaceBuilder(private val context: Context) {
                     val baseline = y - (paint.ascent() + paint.descent()) / 2f
                     canvas.drawText(text, x, baseline, paint)
                     }
-                    "shape" -> drawShape(canvas, layer, x, y, xScale, yScale)
+                    "shape" -> drawShape(canvas, layer, x, y, xScale, yScale, resolved)
                     "image", "imageStrip", "video", "hand" -> {
                     val key = requireNotNull(cacheKeys[layer.index])
                     val source = decodedImages.getOrPut(key) {
@@ -216,7 +225,7 @@ class WatchfaceBuilder(private val context: Context) {
                             document,
                             layer,
                             instant,
-                            stretchToFrame = true,
+                            scaleMode,
                         )
                     }
                     var image = source
@@ -315,13 +324,14 @@ class WatchfaceBuilder(private val context: Context) {
         document: Clock2Document,
         layer: Clock2Layer,
         instant: ZonedDateTime? = null,
-        stretchToFrame: Boolean = false,
+        scaleMode: ScaleMode = ScaleMode.STRETCH,
     ): Bitmap {
         val bytes = requireNotNull(layer.imageData) {
             "Layer ${layer.index} has no embedded image"
         }
-        val targetWidth = max(1, (layer.width * xScale(document)).roundToInt())
-        val targetHeight = max(1, (layer.height * yScale(document)).roundToInt())
+        val resolved = ScaleModeResolver.resolve(scaleMode, document.canvasWidth, document.canvasHeight)
+        val targetWidth = max(1, (layer.width * xScale(document, resolved)).roundToInt())
+        val targetHeight = max(1, (layer.height * yScale(document, resolved)).roundToInt())
         if (layer.type == "video") {
             val source = videoFrame(bytes, layer.index)
             val scaled = placeInFrame(source, targetWidth, targetHeight, layer.contentMode)
@@ -365,10 +375,10 @@ class WatchfaceBuilder(private val context: Context) {
         // the old coordinate system, which looked zoomed/misaligned. Applying
         // the same two-axis transform to every raster layer keeps their
         // relative geometry intact and avoids hidden contain/crop padding.
-        val scaled = if (stretchToFrame) {
+        val scaled = if (scaleMode == ScaleMode.STRETCH || scaleMode == ScaleMode.STRETCH_H) {
             Bitmap.createScaledBitmap(source, targetWidth, targetHeight, true)
         } else {
-            placeInFrame(source, targetWidth, targetHeight, layer.contentMode)
+            placeInFrame(source, targetWidth, targetHeight, if (scaleMode == ScaleMode.COVER) "fill" else layer.contentMode)
         }
         source.recycle()
         return scaled
@@ -378,16 +388,17 @@ class WatchfaceBuilder(private val context: Context) {
         document: Clock2Document,
         layer: Clock2Layer,
         instant: ZonedDateTime,
-        stretchToFrame: Boolean,
+        scaleMode: ScaleMode,
     ): String {
-        val targetWidth = max(1, (layer.width * xScale(document)).roundToInt())
-        val targetHeight = max(1, (layer.height * yScale(document)).roundToInt())
+        val resolved = ScaleModeResolver.resolve(scaleMode, document.canvasWidth, document.canvasHeight)
+        val targetWidth = max(1, (layer.width * xScale(document, resolved)).roundToInt())
+        val targetHeight = max(1, (layer.height * yScale(document, resolved)).roundToInt())
         val assetIdentity = layer.imageFilename.ifBlank {
             System.identityHashCode(requireNotNull(layer.imageData)).toString()
         }
         val frame = if (layer.type == "imageStrip") imageStripIndex(layer, instant) else -1
         return "$assetIdentity:$targetWidth:$targetHeight:${layer.contentMode}:$frame:" +
-            stretchToFrame
+            scaleMode.name
     }
 
     private fun placeInFrame(
@@ -502,6 +513,7 @@ class WatchfaceBuilder(private val context: Context) {
         y: Float,
         xScale: Float,
         yScale: Float,
+        scaleMode: ScaleMode = ScaleMode.STRETCH,
     ) {
         val width = max(1f, layer.width * xScale)
         val height = max(1f, layer.height * yScale)
@@ -623,12 +635,7 @@ class WatchfaceBuilder(private val context: Context) {
             )
         }
         PINNED_HASHES.forEach { (path, hash) ->
-            val expected = if (path == MODULE_PATH) {
-                WfClock23FullPanelPatch.OUTPUT_SHA256
-            } else {
-                hash
-            }
-            check(files[path]?.sha256() == expected) { "Pinned byte changed: $path" }
+            check(files[path]?.sha256() == hash) { "Pinned byte changed: $path" }
         }
     }
 
@@ -689,11 +696,37 @@ class WatchfaceBuilder(private val context: Context) {
         return result
     }
 
-    private fun xScale(document: Clock2Document): Float =
-        VIEWPORT_WIDTH / document.canvasWidth
+    private fun xScale(document: Clock2Document, mode: ScaleMode = ScaleMode.STRETCH): Float =
+        when (mode) {
+            ScaleMode.STRETCH, ScaleMode.STRETCH_H -> VIEWPORT_WIDTH / document.canvasWidth
+            ScaleMode.COVER -> maxOf(
+                VIEWPORT_WIDTH / document.canvasWidth,
+                VIEWPORT_HEIGHT / document.canvasHeight,
+            )
+            ScaleMode.CONTAIN -> minOf(
+                VIEWPORT_WIDTH / document.canvasWidth,
+                VIEWPORT_HEIGHT / document.canvasHeight,
+            )
+            ScaleMode.AUTO -> VIEWPORT_WIDTH / document.canvasWidth
+        }
 
-    private fun yScale(document: Clock2Document): Float =
-        VIEWPORT_HEIGHT / document.canvasHeight
+    private fun yScale(document: Clock2Document, mode: ScaleMode = ScaleMode.STRETCH): Float =
+        when (mode) {
+            ScaleMode.STRETCH -> VIEWPORT_HEIGHT / document.canvasHeight
+            ScaleMode.STRETCH_H -> minOf(
+                VIEWPORT_WIDTH / document.canvasWidth,
+                VIEWPORT_HEIGHT / document.canvasHeight,
+            )
+            ScaleMode.COVER -> maxOf(
+                VIEWPORT_WIDTH / document.canvasWidth,
+                VIEWPORT_HEIGHT / document.canvasHeight,
+            )
+            ScaleMode.CONTAIN -> minOf(
+                VIEWPORT_WIDTH / document.canvasWidth,
+                VIEWPORT_HEIGHT / document.canvasHeight,
+            )
+            ScaleMode.AUTO -> VIEWPORT_HEIGHT / document.canvasHeight
+        }
 
     private fun isRasterLayer(layer: Clock2Layer): Boolean =
         layer.type in setOf("image", "imageStrip", "video", "hand")

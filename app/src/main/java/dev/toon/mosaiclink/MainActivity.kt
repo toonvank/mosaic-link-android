@@ -44,6 +44,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -109,6 +111,7 @@ class MainActivity : ComponentActivity() {
                     permissionsGranted = permissionsGranted,
                     onRequestPermissions = { permissionLauncher.launch(permissions) },
                     onFile = viewModel::selectClock2,
+                    onScaleMode = viewModel::setScaleMode,
                     onConnect = { viewModel.connect() },
                     nearbyDevices = state.nearbyDevices,
                     onConnectDevice = { device -> viewModel.connect(device) },
@@ -153,6 +156,7 @@ private fun MosaicLinkScreen(
     permissionsGranted: Boolean,
     onRequestPermissions: () -> Unit,
     onFile: (android.net.Uri) -> Unit,
+    onScaleMode: (dev.toon.mosaiclink.clock2.ScaleMode) -> Unit,
     onConnect: () -> Unit,
     nearbyDevices: List<Hk8Device>,
     onConnectDevice: (Hk8Device) -> Unit,
@@ -232,6 +236,7 @@ private fun MosaicLinkScreen(
             DeviceHero(
                 connection = state.connection,
                 busy = state.busy,
+                autoConnecting = state.autoConnecting,
                 permissionsGranted = permissionsGranted,
                 onPermissions = onRequestPermissions,
                 onConnect = onConnect,
@@ -248,6 +253,7 @@ private fun MosaicLinkScreen(
                 state = state,
                 onChoose = { filePicker.launch(arrayOf("*/*")) },
                 onInstall = { installDialog = true },
+                onScaleMode = onScaleMode,
             )
             AnimatedVisibility(state.busy) {
                 WorkCard(state, onCancelInstall)
@@ -262,6 +268,7 @@ private fun MosaicLinkScreen(
 private fun DeviceHero(
     connection: BleConnectionState,
     busy: Boolean,
+    autoConnecting: Boolean,
     permissionsGranted: Boolean,
     onPermissions: () -> Unit,
     onConnect: () -> Unit,
@@ -330,7 +337,7 @@ private fun DeviceHero(
                         connected -> onDisconnect
                         else -> onConnect
                     },
-                    enabled = !busy,
+                    enabled = !busy || autoConnecting,
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = if (connected) {
@@ -346,6 +353,7 @@ private fun DeviceHero(
                         when {
                             !permissionsGranted -> "Allow nearby devices"
                             connected -> "Disconnect"
+                            autoConnecting -> "Having trouble? Tap to scan"
                             else -> "Scan nearby devices"
                         },
                     )
@@ -359,7 +367,7 @@ private fun DeviceHero(
                     nearbyDevices.take(8).forEach { device ->
                         OutlinedButton(
                             onClick = { onConnectDevice(device) },
-                            enabled = !busy,
+                            enabled = !busy || autoConnecting,
                             modifier = Modifier.fillMaxWidth(),
                         ) {
                             Column(Modifier.weight(1f)) {
@@ -411,6 +419,7 @@ private fun WatchfaceCard(
     state: MosaicUiState,
     onChoose: () -> Unit,
     onInstall: () -> Unit,
+    onScaleMode: (dev.toon.mosaiclink.clock2.ScaleMode) -> Unit,
 ) {
     Card(shape = RoundedCornerShape(28.dp)) {
         Column(
@@ -522,6 +531,29 @@ private fun WatchfaceCard(
                     modifier = Modifier.weight(1f),
                 ) {
                     Text(if (state.selectedFileName == null) "Choose file" else "Replace")
+                }
+                if (state.builtFace != null) {
+                    var expanded by remember { mutableStateOf(false) }
+                    Box(modifier = Modifier.weight(1f)) {
+                        OutlinedButton(
+                            onClick = { expanded = true },
+                            enabled = !state.busy,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("Fit: ${state.builtFace.scaleMode.name.lowercase()}")
+                        }
+                        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                            dev.toon.mosaiclink.clock2.ScaleMode.entries.forEach { mode ->
+                                DropdownMenuItem(
+                                    text = { Text(mode.name.lowercase().replaceFirstChar { it.uppercase() }) },
+                                    onClick = {
+                                        expanded = false
+                                        onScaleMode(mode)
+                                    },
+                                )
+                            }
+                        }
+                    }
                 }
                 Button(
                     onClick = onInstall,
