@@ -125,6 +125,43 @@ class Hk8BleClient(private val context: Context) {
         }
     }
 
+    /**
+     * Lists nearby BLE devices without assuming the clone's advertised name.
+     * Compatibility is verified only after the user selects a device and GATT
+     * service discovery finds both required SiFli characteristics.
+     */
+    suspend fun scanNearby(timeoutMillis: Long = 12_000): List<Hk8Device> {
+        check(adapter.isEnabled) { "Bluetooth is turned off" }
+        val devices = linkedMapOf<String, Hk8Device>()
+        val finished = CompletableDeferred<Unit>()
+        val callback = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, scanResult: ScanResult) {
+                val name = scanResult.device.name ?: scanResult.scanRecord?.deviceName
+                devices[scanResult.device.address] = Hk8Device(
+                    name = name?.takeIf(String::isNotBlank) ?: "Unnamed BLE device",
+                    address = scanResult.device.address,
+                    rssi = scanResult.rssi,
+                )
+            }
+
+            override fun onScanFailed(errorCode: Int) {
+                finished.completeExceptionally(
+                    IllegalStateException("Bluetooth scan failed ($errorCode)"),
+                )
+            }
+        }
+        adapter.bluetoothLeScanner.startScan(callback)
+        try {
+            withTimeoutOrNull(timeoutMillis) { finished.await() }
+        } finally {
+            adapter.bluetoothLeScanner.stopScan(callback)
+        }
+        return devices.values.sortedWith(
+            compareByDescending<Hk8Device> { it.name.contains("HK8", ignoreCase = true) }
+                .thenByDescending { it.rssi ?: Int.MIN_VALUE },
+        )
+    }
+
     suspend fun connect(device: Hk8Device): BleConnectionState.Connected {
         disconnect()
         connectedDevice = device
