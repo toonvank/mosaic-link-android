@@ -14,6 +14,7 @@ import dev.toon.mosaiclink.clock2.Clock2Document
 import dev.toon.mosaiclink.clock2.Clock2Parser
 import dev.toon.mosaiclink.clock2.Compatibility
 import dev.toon.mosaiclink.clock2.WatchfaceBuilder
+import dev.toon.mosaiclink.catalog.SavedFacesRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
@@ -218,6 +219,37 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearError() {
         mutableState.update { it.copy(error = null) }
+    }
+
+    private val catalogRepo = SavedFacesRepository(getApplication<Application>())
+
+    fun saveToCatalog() {
+        val face = mutableState.value.builtFace ?: return
+        val doc = mutableState.value.document ?: return
+        val name = mutableState.value.selectedFileName ?: "watchface"
+        val bytes = File(getApplication<Application>().filesDir, LAST_CLOCK2).readBytes()
+        val preview = android.graphics.BitmapFactory.decodeByteArray(face.previewPng, 0, face.previewPng.size)
+        catalogRepo.save(name, name, bytes, preview, face.sourceSha256)
+        log("Saved \"$name\" to catalog")
+    }
+
+    fun selectClock2FromCatalog(fileName: String, bytes: ByteArray) {
+        viewModelScope.launch {
+            runBusy("Loading from catalog…") {
+                processClock2(fileName, bytes, persist = true)
+            }
+        }
+    }
+
+    fun selectClock2FromFolder(fileName: String, documentUri: Uri) {
+        viewModelScope.launch {
+            runBusy("Reading $fileName…") {
+                val resolver = getApplication<Application>().contentResolver
+                val bytes = resolver.openInputStream(documentUri)?.use { it.readBytes() }
+                    ?: error("Cannot read $fileName")
+                processClock2(fileName, bytes, persist = true)
+            }
+        }
     }
 
     private suspend fun ensureConnected() {

@@ -35,6 +35,7 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material.icons.rounded.Bluetooth
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CloudUpload
+import androidx.compose.material.icons.rounded.Collections
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.UploadFile
 import androidx.compose.material.icons.rounded.Watch
@@ -50,6 +51,9 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -79,10 +83,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.toon.mosaiclink.ble.BleConnectionState
 import dev.toon.mosaiclink.ble.Hk8Device
+import dev.toon.mosaiclink.catalog.CatalogScreen
+import dev.toon.mosaiclink.catalog.CatalogViewModel
+import dev.toon.mosaiclink.catalog.SavedFace
 import dev.toon.mosaiclink.ui.MosaicTheme
 
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
+    private val catalogViewModel: CatalogViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -103,21 +111,38 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(Unit) {
                     if (!permissionsGranted) permissionLauncher.launch(permissions)
                 }
-                val state by viewModel.state.collectAsState()
-                MosaicLinkScreen(
-                    state = state,
-                    permissionsGranted = permissionsGranted,
-                    onRequestPermissions = { permissionLauncher.launch(permissions) },
-                    onFile = viewModel::selectClock2,
-                    onConnect = { viewModel.connect() },
-                    nearbyDevices = state.nearbyDevices,
-                    onConnectDevice = { device -> viewModel.connect(device) },
-                    onDisconnect = viewModel::disconnect,
-                    onSyncTime = viewModel::syncTime,
-                    onInstall = viewModel::installConfirmed,
-                    onCancelInstall = viewModel::cancelInstall,
-                    onClearError = viewModel::clearError,
-                )
+                var currentScreen by remember { mutableStateOf("installer") }
+
+                when (currentScreen) {
+                    "catalog" -> CatalogScreen(
+                        viewModel = catalogViewModel,
+                        onLoadFace = { face ->
+                            val bytes = catalogViewModel.loadFaceBytes(face) ?: return@CatalogScreen
+                            viewModel.selectClock2FromCatalog(face.fileName, bytes)
+                            currentScreen = "installer"
+                        },
+                        onLoadFolderFace = { face ->
+                            viewModel.selectClock2FromFolder(face.fileName, face.documentUri)
+                            currentScreen = "installer"
+                        },
+                    )
+                    else -> MosaicLinkScreen(
+                        state = viewModel.state.collectAsState().value,
+                        permissionsGranted = permissionsGranted,
+                        onRequestPermissions = { permissionLauncher.launch(permissions) },
+                        onFile = viewModel::selectClock2,
+                        onConnect = { viewModel.connect() },
+                        nearbyDevices = viewModel.state.collectAsState().value.nearbyDevices,
+                        onConnectDevice = { device -> viewModel.connect(device) },
+                        onDisconnect = viewModel::disconnect,
+                        onSyncTime = viewModel::syncTime,
+                        onInstall = viewModel::installConfirmed,
+                        onCancelInstall = viewModel::cancelInstall,
+                        onClearError = viewModel::clearError,
+                        onSaveToCatalog = viewModel::saveToCatalog,
+                        onGoCatalog = { currentScreen = "catalog" },
+                    )
+                }
             }
         }
         importClock2Intent(intent)
@@ -161,6 +186,8 @@ private fun MosaicLinkScreen(
     onInstall: () -> Unit,
     onCancelInstall: () -> Unit,
     onClearError: () -> Unit,
+    onSaveToCatalog: () -> Unit,
+    onGoCatalog: () -> Unit,
 ) {
     val snackbar = remember { SnackbarHostState() }
     val filePicker = rememberLauncherForActivityResult(
@@ -201,6 +228,26 @@ private fun MosaicLinkScreen(
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
         containerColor = MaterialTheme.colorScheme.background,
+        bottomBar = {
+            NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+                NavigationBarItem(
+                    selected = true,
+                    onClick = {},
+                    icon = { Icon(Icons.Rounded.UploadFile, contentDescription = null) },
+                    label = { Text("Install") },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = MaterialTheme.colorScheme.primary,
+                        selectedTextColor = MaterialTheme.colorScheme.primary,
+                    ),
+                )
+                NavigationBarItem(
+                    selected = false,
+                    onClick = onGoCatalog,
+                    icon = { Icon(Icons.Rounded.Collections, contentDescription = null) },
+                    label = { Text("Catalog") },
+                )
+            }
+        },
         topBar = {
             TopAppBar(
                 title = {
@@ -224,7 +271,8 @@ private fun MosaicLinkScreen(
                 .fillMaxSize()
                 .padding(padding)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 18.dp, vertical = 12.dp),
+                .padding(horizontal = 18.dp, vertical = 12.dp)
+                .padding(bottom = 80.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             DeviceHero(
@@ -246,6 +294,7 @@ private fun MosaicLinkScreen(
                 state = state,
                 onChoose = { filePicker.launch(arrayOf("*/*")) },
                 onInstall = { installDialog = true },
+                onSaveToCatalog = onSaveToCatalog,
             )
             AnimatedVisibility(state.busy) {
                 WorkCard(state, onCancelInstall)
@@ -409,6 +458,7 @@ private fun WatchfaceCard(
     state: MosaicUiState,
     onChoose: () -> Unit,
     onInstall: () -> Unit,
+    onSaveToCatalog: () -> Unit,
 ) {
     Card(shape = RoundedCornerShape(28.dp)) {
         Column(
@@ -540,6 +590,18 @@ private fun WatchfaceCard(
                         contentDescription = null,
                         modifier = Modifier.size(18.dp),
                     )
+                }
+            }
+
+            if (state.builtFace != null) {
+                OutlinedButton(
+                    onClick = onSaveToCatalog,
+                    enabled = !state.busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Icon(Icons.Rounded.Collections, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Save to Catalog")
                 }
             }
         }
