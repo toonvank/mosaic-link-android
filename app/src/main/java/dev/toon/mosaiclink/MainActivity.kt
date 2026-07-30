@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.content.Intent
 import android.graphics.BitmapFactory
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -92,6 +93,7 @@ class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels()
     private val catalogViewModel: CatalogViewModel by viewModels()
 
+    @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -111,37 +113,96 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(Unit) {
                     if (!permissionsGranted) permissionLauncher.launch(permissions)
                 }
-                var currentScreen by remember { mutableStateOf("installer") }
 
-                when (currentScreen) {
-                    "catalog" -> CatalogScreen(
-                        viewModel = catalogViewModel,
-                        onLoadFace = { face ->
-                            val bytes = catalogViewModel.loadFaceBytes(face) ?: return@CatalogScreen
-                            viewModel.selectClock2FromCatalog(face.fileName, bytes)
-                            currentScreen = "installer"
-                        },
-                        onLoadFolderFace = { face ->
-                            viewModel.selectClock2FromFolder(face.fileName, face.documentUri)
-                            currentScreen = "installer"
-                        },
-                    )
-                    else -> MosaicLinkScreen(
-                        state = viewModel.state.collectAsState().value,
-                        permissionsGranted = permissionsGranted,
-                        onRequestPermissions = { permissionLauncher.launch(permissions) },
-                        onFile = viewModel::selectClock2,
-                        onConnect = { viewModel.connect() },
-                        nearbyDevices = viewModel.state.collectAsState().value.nearbyDevices,
-                        onConnectDevice = { device -> viewModel.connect(device) },
-                        onDisconnect = viewModel::disconnect,
-                        onSyncTime = viewModel::syncTime,
-                        onInstall = viewModel::installConfirmed,
-                        onCancelInstall = viewModel::cancelInstall,
-                        onClearError = viewModel::clearError,
-                        onSaveToCatalog = viewModel::saveToCatalog,
-                        onGoCatalog = { currentScreen = "catalog" },
-                    )
+                val state by viewModel.state.collectAsState()
+                val currentScreen = state.currentScreen
+                val snackbar = remember { SnackbarHostState() }
+
+                LaunchedEffect(state.error) {
+                    state.error?.let {
+                        snackbar.showSnackbar(it)
+                        viewModel.clearError()
+                    }
+                }
+
+                Scaffold(
+                    snackbarHost = { SnackbarHost(snackbar) },
+                    containerColor = MaterialTheme.colorScheme.background,
+                    bottomBar = {
+                        NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
+                            NavigationBarItem(
+                                selected = currentScreen == "installer",
+                                onClick = { viewModel.setScreen("installer") },
+                                icon = { Icon(Icons.Rounded.UploadFile, contentDescription = null) },
+                                label = { Text("Install") },
+                                colors = NavigationBarItemDefaults.colors(
+                                    selectedIconColor = MaterialTheme.colorScheme.primary,
+                                    selectedTextColor = MaterialTheme.colorScheme.primary,
+                                ),
+                            )
+                            NavigationBarItem(
+                                selected = currentScreen == "catalog",
+                                onClick = { viewModel.setScreen("catalog") },
+                                icon = { Icon(Icons.Rounded.Collections, contentDescription = null) },
+                                label = { Text("Catalog") },
+                                colors = NavigationBarItemDefaults.colors(
+                                    selectedIconColor = MaterialTheme.colorScheme.primary,
+                                    selectedTextColor = MaterialTheme.colorScheme.primary,
+                                ),
+                            )
+                        }
+                    },
+                    topBar = {
+                        TopAppBar(
+                            title = {
+                                Column {
+                                    Text(
+                                        if (currentScreen == "catalog") "Watchface Catalog" else "Mosaic Link",
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    Text(
+                                        if (currentScreen == "catalog") "Browse & install" else "HK8 PRO MAX companion",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            },
+                            colors = TopAppBarDefaults.topAppBarColors(
+                                containerColor = MaterialTheme.colorScheme.background,
+                            ),
+                        )
+                    },
+                ) { padding ->
+                    when (currentScreen) {
+                        "catalog" -> CatalogScreen(
+                            viewModel = catalogViewModel,
+                            onLoadSavedFace = { face ->
+                                val bytes = catalogViewModel.loadFaceBytes(face) ?: return@CatalogScreen
+                                viewModel.selectClock2FromCatalog(face.fileName, bytes)
+                                viewModel.setScreen("installer")
+                            },
+                            onOpenChannelFace = { face ->
+                            },
+                            onDeleteSavedFace = { face ->
+                                catalogViewModel.deleteFace(face.id)
+                            },
+                            modifier = Modifier.padding(padding)
+                        )
+                        else -> MosaicLinkContent(
+                            state = state,
+                            permissionsGranted = permissionsGranted,
+                            onRequestPermissions = { permissionLauncher.launch(permissions) },
+                            onFile = viewModel::selectClock2,
+                            onConnect = { viewModel.connect() },
+                            onConnectDevice = { device -> viewModel.connect(device) },
+                            onDisconnect = viewModel::disconnect,
+                            onSyncTime = viewModel::syncTime,
+                            onInstall = viewModel::installConfirmed,
+                            onCancelInstall = viewModel::cancelInstall,
+                            onSaveToCatalog = viewModel::saveToCatalog,
+                            modifier = Modifier.padding(padding)
+                        )
+                    }
                 }
             }
         }
@@ -155,8 +216,25 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun importClock2Intent(intent: Intent?) {
-        if (intent?.action == Intent.ACTION_VIEW) {
-            intent.data?.let(viewModel::selectClock2)
+        if (intent == null) return
+        when (intent.action) {
+            Intent.ACTION_VIEW -> {
+                intent.data?.let { uri ->
+                    viewModel.selectClock2(uri)
+                    viewModel.setScreen("installer")
+                }
+            }
+            Intent.ACTION_SEND -> {
+                val uri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+                } else {
+                    @Suppress("DEPRECATION")
+                    intent.getParcelableExtra(Intent.EXTRA_STREAM) as? Uri
+                }
+                uri?.let {
+                    viewModel.importSharedClock2(it)
+                }
+            }
         }
     }
 
@@ -171,35 +249,25 @@ class MainActivity : ComponentActivity() {
         }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun MosaicLinkScreen(
+private fun MosaicLinkContent(
     state: MosaicUiState,
     permissionsGranted: Boolean,
     onRequestPermissions: () -> Unit,
     onFile: (android.net.Uri) -> Unit,
     onConnect: () -> Unit,
-    nearbyDevices: List<Hk8Device>,
     onConnectDevice: (Hk8Device) -> Unit,
     onDisconnect: () -> Unit,
     onSyncTime: () -> Unit,
     onInstall: () -> Unit,
     onCancelInstall: () -> Unit,
-    onClearError: () -> Unit,
     onSaveToCatalog: () -> Unit,
-    onGoCatalog: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    val snackbar = remember { SnackbarHostState() }
     val filePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri -> uri?.let(onFile) }
     var installDialog by remember { mutableStateOf(false) }
-    LaunchedEffect(state.error) {
-        state.error?.let {
-            snackbar.showSnackbar(it)
-            onClearError()
-        }
-    }
 
     if (installDialog) {
         AlertDialog(
@@ -225,83 +293,40 @@ private fun MosaicLinkScreen(
         )
     }
 
-    Scaffold(
-        snackbarHost = { SnackbarHost(snackbar) },
-        containerColor = MaterialTheme.colorScheme.background,
-        bottomBar = {
-            NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
-                NavigationBarItem(
-                    selected = true,
-                    onClick = {},
-                    icon = { Icon(Icons.Rounded.UploadFile, contentDescription = null) },
-                    label = { Text("Install") },
-                    colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = MaterialTheme.colorScheme.primary,
-                        selectedTextColor = MaterialTheme.colorScheme.primary,
-                    ),
-                )
-                NavigationBarItem(
-                    selected = false,
-                    onClick = onGoCatalog,
-                    icon = { Icon(Icons.Rounded.Collections, contentDescription = null) },
-                    label = { Text("Catalog") },
-                )
-            }
-        },
-        topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text("Mosaic Link", fontWeight = FontWeight.SemiBold)
-                        Text(
-                            "HK8 PRO MAX companion",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background,
-                ),
-            )
-        },
-    ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 18.dp, vertical = 12.dp)
-                .padding(bottom = 80.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            DeviceHero(
-                connection = state.connection,
-                busy = state.busy,
-                permissionsGranted = permissionsGranted,
-                onPermissions = onRequestPermissions,
-                onConnect = onConnect,
-                nearbyDevices = state.nearbyDevices,
-                onConnectDevice = onConnectDevice,
-                onDisconnect = onDisconnect,
-            )
-            QuickTimeCard(
-                connected = state.connection is BleConnectionState.Connected,
-                busy = state.busy,
-                onSync = if (permissionsGranted) onSyncTime else onRequestPermissions,
-            )
-            WatchfaceCard(
-                state = state,
-                onChoose = { filePicker.launch(arrayOf("*/*")) },
-                onInstall = { installDialog = true },
-                onSaveToCatalog = onSaveToCatalog,
-            )
-            AnimatedVisibility(state.busy) {
-                WorkCard(state, onCancelInstall)
-            }
-            ActivityCard(state.activity)
-            Spacer(Modifier.height(24.dp))
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 18.dp, vertical = 12.dp)
+            .padding(bottom = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        DeviceHero(
+            connection = state.connection,
+            busy = state.busy,
+            permissionsGranted = permissionsGranted,
+            onPermissions = onRequestPermissions,
+            onConnect = onConnect,
+            nearbyDevices = state.nearbyDevices,
+            onConnectDevice = onConnectDevice,
+            onDisconnect = onDisconnect,
+        )
+        QuickTimeCard(
+            connected = state.connection is BleConnectionState.Connected,
+            busy = state.busy,
+            onSync = if (permissionsGranted) onSyncTime else onRequestPermissions,
+        )
+        WatchfaceCard(
+            state = state,
+            onChoose = { filePicker.launch(arrayOf("*/*")) },
+            onInstall = { installDialog = true },
+            onSaveToCatalog = onSaveToCatalog,
+        )
+        AnimatedVisibility(state.busy) {
+            WorkCard(state, onCancelInstall)
         }
+        ActivityCard(state.activity)
+        Spacer(Modifier.height(24.dp))
     }
 }
 

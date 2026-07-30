@@ -3,7 +3,6 @@ package dev.toon.mosaiclink.catalog
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.net.Uri
 import java.io.File
 
 data class SavedFace(
@@ -20,11 +19,3 @@ data class SavedFace(
         return if (f.exists()) BitmapFactory.decodeFile(f.absolutePath) else null
     }
 }
-
-data class FolderFace(
-    val fileName: String,
-    val documentUri: Uri,
-    val size: Long,
-    val lastModified: Long,
-    val previewUri: Uri? = null,
-)

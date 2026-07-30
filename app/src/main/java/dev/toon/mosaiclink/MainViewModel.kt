@@ -39,6 +39,7 @@ data class MosaicUiState(
     val error: String? = null,
     val nearbyDevices: List<Hk8Device> = emptyList(),
     val activity: List<String> = listOf("Ready — no watch contacted"),
+    val currentScreen: String = "installer",
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -221,6 +222,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         mutableState.update { it.copy(error = null) }
     }
 
+    fun setScreen(screen: String) {
+        mutableState.update { it.copy(currentScreen = screen) }
+    }
+
+    fun importSharedClock2(uri: Uri) {
+        viewModelScope.launch {
+            runBusy("Importing shared Clock2 file…") {
+                val resolver = getApplication<Application>().contentResolver
+                val fileName = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                    ?.use { cursor ->
+                        if (cursor.moveToFirst()) cursor.getString(0) else null
+                    } ?: "shared_watchface.clock2"
+                
+                if (!fileName.endsWith(".clock2", ignoreCase = true)) {
+                    error("Shared file is not a valid .clock2 file: $fileName")
+                }
+                
+                val bytes = withContext(Dispatchers.IO) {
+                    resolver.openInputStream(uri)?.use { it.readBytes() }
+                        ?: error("Could not read shared file")
+                }
+                
+                updatePhase("Parsing watchface…")
+                val document = withContext(Dispatchers.Default) {
+                    Clock2Parser.parse(bytes, fileName)
+                }
+                
+                val compatibility = Clock2Parser.compatibility(document)
+                if (!compatibility.supported) {
+                    error("Watchface is incompatible: ${compatibility.reasons.firstOrNull()}")
+                }
+                
+                updatePhase("Rendering watchface preview…")
+                val built = withContext(Dispatchers.Default) {
+                    builder.build(document, ZonedDateTime.now(), 73)
+                }
+                
+                updatePhase("Saving to catalog…")
+                val preview = android.graphics.BitmapFactory.decodeByteArray(built.previewPng, 0, built.previewPng.size)
+                
+                catalogRepo.save(document.name, fileName, bytes, preview, built.sourceSha256)
+                
+                log("Imported \"${document.name}\" to catalog")
+                mutableState.update { it.copy(currentScreen = "catalog") }
+            }
+        }
+    }
+
     private val catalogRepo = SavedFacesRepository(getApplication<Application>())
 
     fun saveToCatalog() {
@@ -236,17 +285,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun selectClock2FromCatalog(fileName: String, bytes: ByteArray) {
         viewModelScope.launch {
             runBusy("Loading from catalog…") {
-                processClock2(fileName, bytes, persist = true)
-            }
-        }
-    }
-
-    fun selectClock2FromFolder(fileName: String, documentUri: Uri) {
-        viewModelScope.launch {
-            runBusy("Reading $fileName…") {
-                val resolver = getApplication<Application>().contentResolver
-                val bytes = resolver.openInputStream(documentUri)?.use { it.readBytes() }
-                    ?: error("Cannot read $fileName")
                 processClock2(fileName, bytes, persist = true)
             }
         }
