@@ -6,6 +6,7 @@ import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.toon.mosaiclink.ble.BleConnectionState
+import dev.toon.mosaiclink.ble.Hk8Device
 import dev.toon.mosaiclink.ble.Hk8BleClient
 import dev.toon.mosaiclink.ble.UploadProgress
 import dev.toon.mosaiclink.clock2.BuiltWatchface
@@ -35,6 +36,7 @@ data class MosaicUiState(
     val uploadProgress: UploadProgress? = null,
     val busy: Boolean = false,
     val error: String? = null,
+    val nearbyDevices: List<Hk8Device> = emptyList(),
     val activity: List<String> = listOf("Ready — no watch contacted"),
 )
 
@@ -134,8 +136,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun connect() {
         viewModelScope.launch {
-            runBusy("Looking for HK8 PRO MAX…") {
-                connectToWatch()
+            runBusy("Scanning nearby Bluetooth devices…") {
+                val devices = ble.scanNearby()
+                mutableState.update { it.copy(nearbyDevices = devices) }
+                check(devices.isNotEmpty()) { "No Bluetooth devices found nearby" }
+                log("Found ${devices.size} nearby devices — choose your watch")
+            }
+        }
+    }
+
+    fun connect(device: Hk8Device) {
+        viewModelScope.launch {
+            runBusy("Connecting to ${device.name}…") {
+                connectToWatch(device)
             }
         }
     }
@@ -212,14 +225,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         connectToWatch()
     }
 
-    private suspend fun connectToWatch() {
+    private suspend fun connectToWatch(selectedDevice: Hk8Device? = null) {
         val preferences = getApplication<Application>().getSharedPreferences(PREFS, 0)
         val preferredAddress = preferences.getString(LAST_DEVICE_ADDRESS, null)
         mutableState.update { it.copy(connection = BleConnectionState.Scanning) }
-        val device = ble.findWatch(preferredAddress)
+        val device = selectedDevice ?: ble.findWatch(preferredAddress)
         mutableState.update { it.copy(connection = BleConnectionState.Connecting(device)) }
         val connected = ble.connect(device)
-        mutableState.update { it.copy(connection = connected) }
+        mutableState.update { it.copy(connection = connected, nearbyDevices = emptyList()) }
         preferences.edit()
             .putString(LAST_DEVICE_ADDRESS, device.address)
             .putString(LAST_DEVICE_NAME, device.name)

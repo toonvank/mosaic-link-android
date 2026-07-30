@@ -78,6 +78,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import dev.toon.mosaiclink.ble.BleConnectionState
+import dev.toon.mosaiclink.ble.Hk8Device
 import dev.toon.mosaiclink.ui.MosaicTheme
 
 class MainActivity : ComponentActivity() {
@@ -108,7 +109,9 @@ class MainActivity : ComponentActivity() {
                     permissionsGranted = permissionsGranted,
                     onRequestPermissions = { permissionLauncher.launch(permissions) },
                     onFile = viewModel::selectClock2,
-                    onConnect = viewModel::connect,
+                    onConnect = { viewModel.connect() },
+                    nearbyDevices = state.nearbyDevices,
+                    onConnectDevice = { device -> viewModel.connect(device) },
                     onDisconnect = viewModel::disconnect,
                     onSyncTime = viewModel::syncTime,
                     onInstall = viewModel::installConfirmed,
@@ -151,6 +154,8 @@ private fun MosaicLinkScreen(
     onRequestPermissions: () -> Unit,
     onFile: (android.net.Uri) -> Unit,
     onConnect: () -> Unit,
+    nearbyDevices: List<Hk8Device>,
+    onConnectDevice: (Hk8Device) -> Unit,
     onDisconnect: () -> Unit,
     onSyncTime: () -> Unit,
     onInstall: () -> Unit,
@@ -230,6 +235,8 @@ private fun MosaicLinkScreen(
                 permissionsGranted = permissionsGranted,
                 onPermissions = onRequestPermissions,
                 onConnect = onConnect,
+                nearbyDevices = state.nearbyDevices,
+                onConnectDevice = onConnectDevice,
                 onDisconnect = onDisconnect,
             )
             QuickTimeCard(
@@ -258,6 +265,8 @@ private fun DeviceHero(
     permissionsGranted: Boolean,
     onPermissions: () -> Unit,
     onConnect: () -> Unit,
+    nearbyDevices: List<Hk8Device>,
+    onConnectDevice: (Hk8Device) -> Unit,
     onDisconnect: () -> Unit,
 ) {
     val connected = connection is BleConnectionState.Connected
@@ -337,9 +346,31 @@ private fun DeviceHero(
                         when {
                             !permissionsGranted -> "Allow nearby devices"
                             connected -> "Disconnect"
-                            else -> "Find and connect"
+                            else -> "Scan nearby devices"
                         },
                     )
+                }
+                if (!connected && nearbyDevices.isNotEmpty()) {
+                    Text(
+                        "Choose your watch. The app will verify the HK8 protocol before connecting.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    nearbyDevices.take(8).forEach { device ->
+                        OutlinedButton(
+                            onClick = { onConnectDevice(device) },
+                            enabled = !busy,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text(device.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(
+                                    "${device.address} • ${device.rssi ?: "unknown"} dBm",
+                                    style = MaterialTheme.typography.labelSmall,
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
