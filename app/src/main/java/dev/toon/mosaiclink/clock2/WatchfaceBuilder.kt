@@ -264,7 +264,7 @@ class WatchfaceBuilder(private val context: Context) {
         val canvas = Canvas(output)
         val centerX = VIEWPORT_WIDTH / 2f
         val centerY = VIEWPORT_HEIGHT / 2f
-        HAND_SPECS.forEach { (kind, spec) ->
+        HAND_SPECS.filterKeys { it != "twentyFourhours" }.forEach { (kind, spec) ->
             canvas.save()
             canvas.rotate(handAngle(kind, instant, 0), centerX, centerY)
             canvas.drawBitmap(
@@ -631,7 +631,7 @@ class WatchfaceBuilder(private val context: Context) {
             VIEWPORT_WIDTH,
             VIEWPORT_HEIGHT,
         )
-        HAND_SPECS.values.forEach { spec ->
+        HAND_SPECS.filterKeys { it != "twentyFourhours" }.values.forEach { spec ->
             validateRaw(
                 requireNotNull(files["ex/resource/$MODULE/${spec.filename}"]),
                 spec.width,
