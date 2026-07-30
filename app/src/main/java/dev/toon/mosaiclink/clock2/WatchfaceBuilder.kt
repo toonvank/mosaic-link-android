@@ -110,11 +110,11 @@ class WatchfaceBuilder(private val context: Context) {
         val hourKind = when {
             mainLayers["twelveHours"] != null -> "twelveHours"
             mainLayers["twentyFourhours"] != null -> "twentyFourhours"
-            else -> error("Compatible face is missing a central hour hand")
+            else -> null
         }
         val hands = linkedMapOf<String, Bitmap>()
         HAND_SPECS.filterKeys { it != "twentyFourhours" }.forEach { (kind, spec) ->
-            val sourceKind = if (kind == "twelveHours") hourKind else kind
+            val sourceKind = if (kind == "twelveHours" && hourKind != null) hourKind else kind
             val hand = mainLayers[sourceKind]?.let { fitHand(document, it, spec) }
                 ?: Bitmap.createBitmap(spec.width, spec.height, Bitmap.Config.ARGB_8888)
             hands[kind] = hand

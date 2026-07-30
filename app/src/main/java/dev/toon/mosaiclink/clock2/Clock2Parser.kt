@@ -213,22 +213,28 @@ object Clock2Parser {
             .filter { round3(it.x) == 0 && round3(it.y) == 0 }
             .groupingBy { it.kind }
             .eachCount()
-        val hourKind = when {
-            centralHands["twelveHours"] != null -> "twelveHours"
-            centralHands["twentyFourhours"] != null -> "twentyFourhours"
-            else -> null
+        val hasHands = hands.isNotEmpty()
+        if (hasHands) {
+            val hourKind = when {
+                centralHands["twelveHours"] != null -> "twelveHours"
+                centralHands["twentyFourhours"] != null -> "twentyFourhours"
+                else -> null
+            }
+            if (hourKind == null) {
+                reasons += "A central hour hand (twelveHours or twentyFourhours) is required when hands are present"
+            } else if (centralHands[hourKind] != 1) {
+                reasons += "Exactly one central $hourKind hand is required"
+            }
+            if (centralHands["minute"] == null) {
+                reasons += "A central minute hand is required when hands are present"
+            } else if (centralHands["minute"] != 1) {
+                reasons += "Exactly one central minute hand is required"
+            }
+            if ((centralHands["seconds"] ?: 0) > 1) {
+                reasons += "At most one central seconds hand is supported"
+            }
         }
-        if (hourKind == null) {
-            reasons += "A central hour hand (twelveHours or twentyFourhours) is required"
-        } else if (centralHands[hourKind] != 1) {
-            reasons += "Exactly one central $hourKind hand is required"
-        }
-        if (centralHands["minute"] != 1) {
-            reasons += "Exactly one central minute hand is required"
-        }
-        if ((centralHands["seconds"] ?: 0) > 1) {
-            reasons += "At most one central seconds hand is supported"
-        } else if ((centralHands["seconds"] ?: 0) == 0) {
+        if (hasHands && (centralHands["seconds"] ?: 0) == 0) {
             warnings += "The missing central seconds hand will be transparent"
         }
         return Compatibility(
