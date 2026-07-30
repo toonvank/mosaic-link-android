@@ -182,17 +182,13 @@ class WatchfaceBuilder(private val context: Context) {
         val yScale = yScale(document)
         val centerX = VIEWPORT_WIDTH / 2f
         val centerY = VIEWPORT_HEIGHT / 2f
-        val primaryBackgroundIndex = document.activeLayers
-            .firstOrNull { it.type == "image" }
-            ?.index
         // Capture all asset keys before BitmapFactory sees any buffers. Clock2
         // uses the filename as its deduplication/reference identity.
         val cacheKeys = document.activeLayers
             .filter(::isRasterLayer)
             .filterNot(::isMainHand)
             .associate {
-                val stretchToPanel = it.index == primaryBackgroundIndex
-                it.index to layerCacheKey(document, it, instant, stretchToPanel)
+                it.index to layerCacheKey(document, it, instant, stretchToFrame = true)
             }
         val decodedImages = mutableMapOf<String, Bitmap>()
         try {
@@ -220,7 +216,7 @@ class WatchfaceBuilder(private val context: Context) {
                             document,
                             layer,
                             instant,
-                            stretchToFrame = layer.index == primaryBackgroundIndex,
+                            stretchToFrame = true,
                         )
                     }
                     var image = source
@@ -364,10 +360,11 @@ class WatchfaceBuilder(private val context: Context) {
             source.recycle()
             source = frame
         }
-        // A full-screen Clock2 face and this HK8 panel have different aspect
-        // ratios. Stretch only the base artwork so all bezel markings survive;
-        // cover-cropping removes the top/bottom scale, while fitting recreates
-        // the black side bars this full-panel experiment is meant to eliminate.
+        // This experiment maps the *complete* Clock2 composition onto the
+        // full panel. Scaling only the background left dials and overlays in
+        // the old coordinate system, which looked zoomed/misaligned. Applying
+        // the same two-axis transform to every raster layer keeps their
+        // relative geometry intact and avoids hidden contain/crop padding.
         val scaled = if (stretchToFrame) {
             Bitmap.createScaledBitmap(source, targetWidth, targetHeight, true)
         } else {

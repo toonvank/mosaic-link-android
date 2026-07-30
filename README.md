@@ -15,17 +15,20 @@ Obsidian research vault.
 
 ## Experimental full-panel build
 
-This branch produces `0.2.0-experimental.1`, a deliberately separate test
-build. It changes the known official `wf_clock23` module only at its four
-display-geometry values:
+This branch produces `0.2.0-experimental.2`, a deliberately separate test
+build. It changes the known official `wf_clock23` module only at its display
+geometry values and its single page-glue argument:
 
 - root viewport: 410 × 494 → 485 × 520;
-- analog center: `(205,247)` → `(242,260)`.
+- analog center: `(205,247)` → `(242,260)`;
+- page glue: enabled → disabled, preventing the oversized root from becoming
+  pannable.
 
 The patch is fail-closed: it starts from the hash-pinned official module,
 requires each original byte sequence to occur exactly once, and pins the
-resulting ELF hash. The full-screen background is widened slightly so it fills
-the physical panel without black side bars or tachymeter cropping.
+resulting ELF hash. Every static Clock2 raster layer receives the same
+two-axis transform, so overlays and dials stay registered with the widened
+background rather than being fitted independently.
 
 This has passed offline validation and phone-preview testing only. It has **not
 been activated on a watch**. Treat a boot loop as possible. Keep a different
