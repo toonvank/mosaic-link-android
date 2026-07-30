@@ -51,6 +51,7 @@ class WatchfaceBuilder(private val context: Context) {
 
         private val HAND_SPECS = linkedMapOf(
             "twelveHours" to HandSpec("wf_clock23_h.bin", 30, 134, 15, 126),
+            "twentyFourhours" to HandSpec("wf_clock23_h.bin", 30, 134, 15, 126),
             "minute" to HandSpec("wf_clock23_m.bin", 30, 210, 15, 202),
             "seconds" to HandSpec("wf_clock23_s.bin", 12, 244, 6, 202),
         )
@@ -106,12 +107,15 @@ class WatchfaceBuilder(private val context: Context) {
         val mainLayers = document.activeLayers
             .filter(::isMainHand)
             .associateBy { it.kind }
-        check(mainLayers.keys.containsAll(setOf("twelveHours", "minute"))) {
-            "Compatible face is missing a central hour or minute hand"
+        val hourKind = when {
+            mainLayers["twelveHours"] != null -> "twelveHours"
+            mainLayers["twentyFourhours"] != null -> "twentyFourhours"
+            else -> error("Compatible face is missing a central hour hand")
         }
         val hands = linkedMapOf<String, Bitmap>()
-        HAND_SPECS.forEach { (kind, spec) ->
-            val hand = mainLayers[kind]?.let { fitHand(document, it, spec) }
+        HAND_SPECS.filterKeys { it != "twentyFourhours" }.forEach { (kind, spec) ->
+            val sourceKind = if (kind == "twelveHours") hourKind else kind
+            val hand = mainLayers[sourceKind]?.let { fitHand(document, it, spec) }
                 ?: Bitmap.createBitmap(spec.width, spec.height, Bitmap.Config.ARGB_8888)
             hands[kind] = hand
             files["ex/resource/$MODULE/${spec.filename}"] = rawResource(hand)

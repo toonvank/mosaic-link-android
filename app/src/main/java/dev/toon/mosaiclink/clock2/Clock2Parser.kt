@@ -213,14 +213,22 @@ object Clock2Parser {
             .filter { round3(it.x) == 0 && round3(it.y) == 0 }
             .groupingBy { it.kind }
             .eachCount()
-        listOf("twelveHours", "minute").forEach { kind ->
-            if (centralHands[kind] != 1) {
-                reasons += "Exactly one central $kind hand is required"
-            }
+        val hourKind = when {
+            centralHands["twelveHours"] != null -> "twelveHours"
+            centralHands["twentyFourhours"] != null -> "twentyFourhours"
+            else -> null
+        }
+        if (hourKind == null) {
+            reasons += "A central hour hand (twelveHours or twentyFourhours) is required"
+        } else if (centralHands[hourKind] != 1) {
+            reasons += "Exactly one central $hourKind hand is required"
+        }
+        if (centralHands["minute"] != 1) {
+            reasons += "Exactly one central minute hand is required"
         }
         if ((centralHands["seconds"] ?: 0) > 1) {
             reasons += "At most one central seconds hand is supported"
-        } else if (centralHands["seconds"] == null) {
+        } else if ((centralHands["seconds"] ?: 0) == 0) {
             warnings += "The missing central seconds hand will be transparent"
         }
         return Compatibility(
