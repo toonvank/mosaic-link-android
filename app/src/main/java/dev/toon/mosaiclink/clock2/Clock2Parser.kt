@@ -39,13 +39,23 @@ object Clock2Parser {
             .maxByOrNull { it.length() }
             ?: throw IllegalArgumentException("Clock2 file has no layers")
 
-        val visibleSizes = (0 until rawLayers.length())
-            .mapNotNull { rawLayers.optJSONObject(it) }
-            .filter { it.optDouble("width", 0.0) > 0 && it.optDouble("height", 0.0) > 0 }
-        val canvasWidth = visibleSizes.maxOfOrNull { it.optDouble("width").toFloat() }
-            ?: throw IllegalArgumentException("Could not determine Clock2 canvas width")
-        val canvasHeight = visibleSizes.maxOfOrNull { it.optDouble("height").toFloat() }
-            ?: throw IllegalArgumentException("Could not determine Clock2 canvas height")
+        val canvas = Clock2CanvasInference.infer(
+            (0 until rawLayers.length()).mapNotNull { index ->
+                rawLayers.optJSONObject(index)?.let { raw ->
+                    Clock2LayerGeometry(
+                        index = index,
+                        type = raw.optString("type", "unknown"),
+                        x = raw.optDouble("xPos", 0.0).toFloat(),
+                        y = raw.optDouble("yPos", 0.0).toFloat(),
+                        width = raw.optDouble("width", 0.0).toFloat(),
+                        height = raw.optDouble("height", 0.0).toFloat(),
+                        hidden = raw.optBoolean("isHidden", false),
+                    )
+                }
+            },
+        ) ?: throw IllegalArgumentException("Could not determine Clock2 canvas size")
+        val canvasWidth = canvas.width
+        val canvasHeight = canvas.height
 
         val assets = mutableMapOf<String, ByteArray>()
         val decoded = ArrayList<ByteArray?>(rawLayers.length())
@@ -232,6 +242,60 @@ object Clock2Parser {
     }
 
     private fun round3(value: Float): Int = (value * 1000f).toInt()
+}
+
+internal data class Clock2LayerGeometry(
+    val index: Int,
+    val type: String,
+    val x: Float,
+    val y: Float,
+    val width: Float,
+    val height: Float,
+    val hidden: Boolean,
+)
+
+internal data class Clock2CanvasSize(val width: Float, val height: Float)
+
+/**
+ * Clock2 does not store a dedicated canvas-size field. Full-screen exports do,
+ * however, carry one or more centered image layers at the logical face size.
+ * Hands and complications may use much larger transparent frames, so treating
+ * the largest layer as the canvas makes the complete composition shrink or
+ * overflow unpredictably.
+ */
+internal object Clock2CanvasInference {
+    fun infer(layers: List<Clock2LayerGeometry>): Clock2CanvasSize? {
+        val visible = layers.filter {
+            !it.hidden && it.width > 0f && it.height > 0f
+        }
+        if (visible.isEmpty()) return null
+
+        val images = visible.filter { it.type == "image" }
+        val centeredImages = images.filter(::isCentered)
+        val background = (centeredImages.ifEmpty { images })
+            .maxWithOrNull(
+                compareBy<Clock2LayerGeometry> { it.width * it.height }
+                    .thenBy { -it.index },
+            )
+        if (background != null) {
+            return Clock2CanvasSize(background.width, background.height)
+        }
+
+        // Compatibility currently requires an image background, but retain a
+        // conservative fallback so malformed files get a useful parse error
+        // later instead of failing due to an unrelated geometry assumption.
+        return Clock2CanvasSize(
+            width = visible.maxOf { it.width },
+            height = visible.maxOf { it.height },
+        )
+    }
+
+    private fun isCentered(layer: Clock2LayerGeometry): Boolean {
+        val xTolerance = maxOf(1f, layer.width * 0.02f)
+        val yTolerance = maxOf(1f, layer.height * 0.02f)
+        return kotlin.math.abs(layer.x) <= xTolerance &&
+            kotlin.math.abs(layer.y) <= yTolerance
+    }
 }
 
 internal fun ByteArray.sha256(): String = MessageDigest.getInstance("SHA-256")

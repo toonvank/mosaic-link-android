@@ -6,6 +6,7 @@ import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.toon.mosaiclink.ble.BleConnectionState
+import dev.toon.mosaiclink.ble.BleForegroundService
 import dev.toon.mosaiclink.ble.Hk8Device
 import dev.toon.mosaiclink.ble.Hk8BleClient
 import dev.toon.mosaiclink.ble.UploadProgress
@@ -13,6 +14,7 @@ import dev.toon.mosaiclink.clock2.BuiltWatchface
 import dev.toon.mosaiclink.clock2.Clock2Document
 import dev.toon.mosaiclink.clock2.Clock2Parser
 import dev.toon.mosaiclink.clock2.Compatibility
+import dev.toon.mosaiclink.clock2.ScaleMode
 import dev.toon.mosaiclink.clock2.WatchfaceBuilder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -32,11 +34,13 @@ data class MosaicUiState(
     val document: Clock2Document? = null,
     val compatibility: Compatibility? = null,
     val builtFace: BuiltWatchface? = null,
+    val scaleMode: ScaleMode = ScaleMode.CONTAIN,
     val phase: String? = null,
     val uploadProgress: UploadProgress? = null,
     val busy: Boolean = false,
     val error: String? = null,
     val nearbyDevices: List<Hk8Device> = emptyList(),
+    val autoConnecting: Boolean = false,
     val activity: List<String> = listOf("Ready — no watch contacted"),
 )
 
@@ -64,9 +68,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             viewModelScope.launch {
                 runBusy("Restoring last Clock2 file…") {
                     val bytes = withContext(Dispatchers.IO) { cached.readBytes() }
-                    processClock2(name, bytes, persist = false)
+                    processClock2(name, bytes, persist = false, ScaleMode.CONTAIN)
                 }
             }
+        }
+        val prefs = application.getSharedPreferences(PREFS, 0)
+        val lastAddress = prefs.getString(LAST_DEVICE_ADDRESS, null)
+        if (lastAddress != null) {
+            autoConnect()
+        }
+    }
+
+    private fun autoConnect() {
+        viewModelScope.launch {
+            mutableState.update { it.copy(autoConnecting = true) }
+            try {
+                connectToWatch()
+            } catch (e: Exception) {
+                log("Auto-connect failed — tap to scan for devices")
+            } finally {
+                mutableState.update { it.copy(autoConnecting = false) }
+            }
+        }
+        viewModelScope.launch {
+            try {
+                val devices = ble.scanNearby()
+                mutableState.update { it.copy(nearbyDevices = devices) }
+            } catch (_: Exception) {}
         }
     }
 
@@ -82,7 +110,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     resolver.openInputStream(uri)?.use { it.readBytes() }
                         ?: error("Android could not open this file")
                 }
-                processClock2(fileName, bytes, persist = true)
+                processClock2(fileName, bytes, persist = true, mutableState.value.scaleMode)
+            }
+        }
+    }
+
+    fun setScaleMode(mode: ScaleMode) {
+        mutableState.update { it.copy(scaleMode = mode) }
+        val document = mutableState.value.document ?: return
+        viewModelScope.launch {
+            runBusy("Re-rendering with ${mode.name}…") {
+                processClock2(
+                    mutableState.value.selectedFileName ?: "watchface.clock2",
+                    document.sourceSha256.toByteArray(),
+                    persist = false,
+                    mode,
+                    cachedDocument = document,
+                )
             }
         }
     }
@@ -91,9 +135,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         fileName: String,
         bytes: ByteArray,
         persist: Boolean,
+        scaleMode: ScaleMode = ScaleMode.CONTAIN,
+        cachedDocument: Clock2Document? = null,
     ) {
         updatePhase("Checking layer topology…")
-        val document = withContext(Dispatchers.Default) {
+        val document = cachedDocument ?: withContext(Dispatchers.Default) {
             Clock2Parser.parse(bytes, fileName)
         }
         val compatibility = Clock2Parser.compatibility(document)
@@ -112,7 +158,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         updatePhase("Rendering and validating assets…")
         val built = withContext(Dispatchers.Default) {
-            builder.build(document, ZonedDateTime.now(), 73)
+            builder.build(document, ZonedDateTime.now(), 73, scaleMode)
         }
         if (persist) {
             withContext(Dispatchers.IO) {
@@ -138,7 +184,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             runBusy("Scanning nearby Bluetooth devices…") {
                 val devices = ble.scanNearby()
-                mutableState.update { it.copy(nearbyDevices = devices) }
+                mutableState.update { it.copy(nearbyDevices = devices, autoConnecting = false) }
                 check(devices.isNotEmpty()) { "No Bluetooth devices found nearby" }
                 log("Found ${devices.size} nearby devices — choose your watch")
             }
@@ -147,6 +193,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun connect(device: Hk8Device) {
         viewModelScope.launch {
+            mutableState.update { it.copy(autoConnecting = false) }
             runBusy("Connecting to ${device.name}…") {
                 connectToWatch(device)
             }
@@ -155,9 +202,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun disconnect() {
         ble.disconnect()
+        BleForegroundService.stop(getApplication())
         mutableState.update {
             it.copy(
                 connection = BleConnectionState.Disconnected,
+                autoConnecting = false,
                 phase = null,
                 uploadProgress = null,
             )
@@ -188,6 +237,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 updatePhase("Installing ${face.displayName}…")
                 log("Transfer started — keep the watch awake")
                 ble.uploadWatchface(face.packageBytes) { progress ->
+                    BleForegroundService.update(
+                        getApplication(),
+                        "Sending ${progress.fileName} (${progress.fileIndex}/${progress.fileCount})",
+                    )
                     mutableState.update {
                         it.copy(uploadProgress = progress, phase = "Sending ${progress.fileName}")
                     }
@@ -204,6 +257,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         installJob?.cancel()
         installJob = null
         ble.disconnect()
+        BleForegroundService.stop(getApplication())
         mutableState.update {
             it.copy(
                 connection = BleConnectionState.Disconnected,
@@ -232,6 +286,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val device = selectedDevice ?: ble.findWatch(preferredAddress)
         mutableState.update { it.copy(connection = BleConnectionState.Connecting(device)) }
         val connected = ble.connect(device)
+        BleForegroundService.start(getApplication(), "Connected to ${device.name}")
         mutableState.update { it.copy(connection = connected, nearbyDevices = emptyList()) }
         preferences.edit()
             .putString(LAST_DEVICE_ADDRESS, device.address)
@@ -283,6 +338,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     override fun onCleared() {
         installJob?.cancel()
         ble.disconnect()
+        BleForegroundService.stop(getApplication())
         super.onCleared()
     }
 }

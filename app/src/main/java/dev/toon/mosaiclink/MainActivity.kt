@@ -16,6 +16,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -44,6 +45,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
@@ -109,6 +112,7 @@ class MainActivity : ComponentActivity() {
                     permissionsGranted = permissionsGranted,
                     onRequestPermissions = { permissionLauncher.launch(permissions) },
                     onFile = viewModel::selectClock2,
+                    onScaleMode = viewModel::setScaleMode,
                     onConnect = { viewModel.connect() },
                     nearbyDevices = state.nearbyDevices,
                     onConnectDevice = { device -> viewModel.connect(device) },
@@ -153,6 +157,7 @@ private fun MosaicLinkScreen(
     permissionsGranted: Boolean,
     onRequestPermissions: () -> Unit,
     onFile: (android.net.Uri) -> Unit,
+    onScaleMode: (dev.toon.mosaiclink.clock2.ScaleMode) -> Unit,
     onConnect: () -> Unit,
     nearbyDevices: List<Hk8Device>,
     onConnectDevice: (Hk8Device) -> Unit,
@@ -183,7 +188,10 @@ private fun MosaicLinkScreen(
                 Text(
                     "On the watch, select a different official stock face and leave " +
                         "the screen awake. Also close Wearfit so it does not compete " +
-                        "for the Bluetooth connection.",
+                        "for the Bluetooth connection.\n\nThis local experiment patches " +
+                        "the official face-23 display geometry from 410×494 to the " +
+                        "XDA-measured 434×494 visible area. Keep the known-good " +
+                        "stock face available for recovery.",
                 )
             },
             confirmButton = {
@@ -230,6 +238,7 @@ private fun MosaicLinkScreen(
             DeviceHero(
                 connection = state.connection,
                 busy = state.busy,
+                autoConnecting = state.autoConnecting,
                 permissionsGranted = permissionsGranted,
                 onPermissions = onRequestPermissions,
                 onConnect = onConnect,
@@ -246,6 +255,7 @@ private fun MosaicLinkScreen(
                 state = state,
                 onChoose = { filePicker.launch(arrayOf("*/*")) },
                 onInstall = { installDialog = true },
+                onScaleMode = onScaleMode,
             )
             AnimatedVisibility(state.busy) {
                 WorkCard(state, onCancelInstall)
@@ -260,6 +270,7 @@ private fun MosaicLinkScreen(
 private fun DeviceHero(
     connection: BleConnectionState,
     busy: Boolean,
+    autoConnecting: Boolean,
     permissionsGranted: Boolean,
     onPermissions: () -> Unit,
     onConnect: () -> Unit,
@@ -328,7 +339,7 @@ private fun DeviceHero(
                         connected -> onDisconnect
                         else -> onConnect
                     },
-                    enabled = !busy,
+                    enabled = !busy || autoConnecting,
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = if (connected) {
@@ -344,6 +355,7 @@ private fun DeviceHero(
                         when {
                             !permissionsGranted -> "Allow nearby devices"
                             connected -> "Disconnect"
+                            autoConnecting -> "Having trouble? Tap to scan"
                             else -> "Scan nearby devices"
                         },
                     )
@@ -357,7 +369,7 @@ private fun DeviceHero(
                     nearbyDevices.take(8).forEach { device ->
                         OutlinedButton(
                             onClick = { onConnectDevice(device) },
-                            enabled = !busy,
+                            enabled = !busy || autoConnecting,
                             modifier = Modifier.fillMaxWidth(),
                         ) {
                             Column(Modifier.weight(1f)) {
@@ -409,6 +421,7 @@ private fun WatchfaceCard(
     state: MosaicUiState,
     onChoose: () -> Unit,
     onInstall: () -> Unit,
+    onScaleMode: (dev.toon.mosaiclink.clock2.ScaleMode) -> Unit,
 ) {
     Card(shape = RoundedCornerShape(28.dp)) {
         Column(
@@ -439,9 +452,10 @@ private fun WatchfaceCard(
                     Image(
                         bitmap = bitmap,
                         contentDescription = "Watchface preview",
-                        contentScale = ContentScale.Crop,
+                        contentScale = ContentScale.Fit,
                         modifier = Modifier
-                            .size(width = 126.dp, height = 136.dp)
+                            .width(126.dp)
+                            .aspectRatio(bitmap.width.toFloat() / bitmap.height)
                             .clip(RoundedCornerShape(24.dp))
                             .background(Color.Black),
                     )
@@ -464,12 +478,14 @@ private fun WatchfaceCard(
                         )
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            "${face.fileCount} files • stock binary preserved",
+                            "${face.fileCount} files • measured 434×494 profile",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Text(
-                            "Target: stock face 23 • verified",
+                            "Source: ${state.document?.canvasWidth?.toInt()}×" +
+                                "${state.document?.canvasHeight?.toInt()} • " +
+                                "fit: ${face.scaleMode.label.lowercase()}",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -520,6 +536,36 @@ private fun WatchfaceCard(
                     modifier = Modifier.weight(1f),
                 ) {
                     Text(if (state.selectedFileName == null) "Choose file" else "Replace")
+                }
+                if (state.builtFace != null) {
+                    var expanded by remember { mutableStateOf(false) }
+                    Box(modifier = Modifier.weight(1f)) {
+                        OutlinedButton(
+                            onClick = { expanded = true },
+                            enabled = !state.busy,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(
+                                state.builtFace.scaleMode.label,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                            listOf(
+                                dev.toon.mosaiclink.clock2.ScaleMode.CONTAIN,
+                                dev.toon.mosaiclink.clock2.ScaleMode.COVER,
+                            ).forEach { mode ->
+                                DropdownMenuItem(
+                                    text = { Text(mode.label) },
+                                    onClick = {
+                                        expanded = false
+                                        onScaleMode(mode)
+                                    },
+                                )
+                            }
+                        }
+                    }
                 }
                 Button(
                     onClick = onInstall,
