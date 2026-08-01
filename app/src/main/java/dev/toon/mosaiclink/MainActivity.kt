@@ -103,6 +103,9 @@ class MainActivity : ComponentActivity() {
                 LaunchedEffect(Unit) {
                     if (!permissionsGranted) permissionLauncher.launch(permissions)
                 }
+                LaunchedEffect(permissionsGranted) {
+                    if (permissionsGranted) viewModel.autoConnect()
+                }
                 val state by viewModel.state.collectAsState()
                 MosaicLinkScreen(
                     state = state,
