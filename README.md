@@ -53,21 +53,38 @@ or firmware as unsupported until its stock module and protocol are verified.
 
 ## Clock2 conversion behavior
 
-Mosaic Link keeps the stock module safe by turning Clock2 content into a
-verified static background plus the central live hour, minute, and optional
-seconds hands.
+Mosaic Link has two conversion runtimes:
+
+- Analog faces keep the hash-pinned official `wf_clock23` adapter and its live
+  central hour, minute, and optional seconds hands.
+- Faces containing digital time use the clean `wf_clock443` live-digital
+  runtime. It maps `HH:mm` (including split hour/minute layers), seconds,
+  numeric day, month, weekday, battery, steps, calories, heart rate, distance,
+  and dashed battery bars to native watch callbacks. Digit and sequence atlases
+  are generated from each Clock2 layer's embedded font, color, alpha, size, and
+  supported interlaced effect; ordinary labels and separators remain static
+  artwork.
 
 - Images, common date formats, shapes, and secondary hands are flattened.
 - Image strips select the frame for the installation time.
 - Videos use a still first frame; video animation is not transferred.
 - Clock2 group headers are metadata and are ignored.
-- Weather, sensor, and unsupported digital data layers are omitted and shown
-  as conversion notes in the preview.
+- Weather and its matching symbols can be retained as offline face artwork;
+  they do not claim to update when the watch has no phone weather source.
+  Unknown live time and data-label formats are rejected instead of being
+  silently frozen, dropped, or replaced with placeholder values.
 - A rejected or failed file never replaces the last successfully built file.
 
+The live-digital runtime is deterministic, hash-pinned, and offline-audited,
+including its watchface-registration ABI. It has not yet completed staged
+activation testing on the physical watch. The app labels it explicitly and
+requires a separate risk acknowledgement before transfer. Do not treat that
+runtime as watch-proven until its lifecycle-only and widget stages have each
+survived activation.
+
 This is intentionally honest about partial conversion: “compatible with
-notes” means the generated package is structurally safe, not that unavailable
-Apple Watch services have become live HK8 complications.
+notes” means the generated package is structurally validated, not that
+unavailable Apple Watch services have become HK8 services.
 
 ## Safety boundary
 
@@ -96,7 +113,8 @@ Keep this repository **private in its current form**. A public push would also
 publish these externally sourced binary dependencies:
 
 - `app/src/main/jniLibs/armeabi-v7a/libezip.so`;
-- `app/src/main/assets/stock_wf_clock23.zip`.
+- `app/src/main/assets/stock_wf_clock23.zip`;
+- `app/src/main/assets/stock_wf_clock443.zip`.
 
 Before making the project public, either obtain redistribution permission for
 both files or remove them from version control and require each user to import

@@ -7,6 +7,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.Paint
+import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
@@ -30,6 +31,30 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 class WatchfaceBuilder(private val context: Context) {
+    private val fontCache = mutableMapOf<String, Typeface>()
+
+    private fun layerTypeface(layer: Clock2Layer): Typeface {
+        val fontData = layer.fontData
+        if (fontData != null && fontData.size >= 4) {
+            val cacheKey = layer.fontName.ifBlank {
+                layer.imageFilename.ifBlank { "${fontData.size}" }
+            }
+            return fontCache.getOrPut(cacheKey) {
+                Typeface.createFromFile(
+                    java.io.File.createTempFile("clock2font", ".ttf").apply {
+                    writeBytes(fontData)
+                    deleteOnExit()
+                }
+                )
+            }
+        }
+        return if (layer.fontName == "Apple Symbols") {
+            Typeface.create("sans-serif-light", Typeface.NORMAL)
+        } else {
+            Typeface.create("sans-serif-condensed", Typeface.NORMAL)
+        }
+    }
+
     private data class HandSpec(
         val filename: String,
         val width: Int,
@@ -48,6 +73,12 @@ class WatchfaceBuilder(private val context: Context) {
         private const val DONOR_ASSET = "stock_wf_clock23.zip"
         private const val DONOR_SHA =
             "bff011a4d1afbc717937169cbb23b86cb6952049090e3d3a475a0555f780ad49"
+        private const val DIGITAL_MODULE = "wf_clock443"
+        private const val DIGITAL_MODULE_PATH = "ex/installer_wf/wf_clock443.so"
+        private const val DIGITAL_DONOR_ASSET = "stock_wf_clock443.zip"
+        private const val DIGITAL_RUNTIME_ASSET = "wf_clock443_digital.so"
+        private const val DIGITAL_DONOR_SHA =
+            "3e5e50ec726629661ae3a399f4c8376e2177f3cac7b8fbd591043e14477d3927"
 
         private val HAND_SPECS = linkedMapOf(
             "twelveHours" to HandSpec("wf_clock23_h.bin", 30, 134, 15, 126),
@@ -66,6 +97,12 @@ class WatchfaceBuilder(private val context: Context) {
                 "d5ba3120970f973ee72efc4d05034bb20a52e8051f757b59ec98e5f99f1c08a7",
             "ex/resource/wf_clock23/wf_clock23_yuan_02.bin" to
                 "97577ce906fb5280a8477605c7073acca3fc88b311f4810e2ce83237b4e44316",
+        )
+        private val DIGITAL_PINNED_HASHES = mapOf(
+            "ex/installer_wf/wf_clock443.dsc" to
+                "8db1e7ae6fb64a26718e9caba5f94ce65f37d9b55fe774682241f48ee14b1f94",
+            "ex/installer_wf/wf_clock443_res.so" to
+                "3e7b683d1d2a7ea8faa058da1f59482f913fef7710ef0afdeefa7a1c6df3db97",
         )
         private val EXPECTED_FILES = setOf(
             "ex/installer_wf/wf_clock23.dsc",
@@ -90,6 +127,9 @@ class WatchfaceBuilder(private val context: Context) {
         val compatibility = Clock2Parser.compatibility(document)
         require(compatibility.supported) {
             compatibility.reasons.joinToString("; ")
+        }
+        if (document.activeLayers.any { it.type == "time" }) {
+            return buildDigital(document, instant, battery, scaleMode, compatibility)
         }
         val resolvedMode = ScaleModeResolver.resolve(
             scaleMode, document.canvasWidth, document.canvasHeight,
@@ -175,11 +215,449 @@ class WatchfaceBuilder(private val context: Context) {
         )
     }
 
+    private data class DigitalSlot(
+        val index: Int,
+        val layer: Clock2Layer,
+        val maxChars: Int,
+        val x: Int,
+        val y: Int,
+    )
+
+    private data class DigitalSequenceSlot(
+        val index: Int,
+        val layer: Clock2Layer,
+        val x: Int,
+        val y: Int,
+    )
+
+    private fun buildDigital(
+        document: Clock2Document,
+        instant: ZonedDateTime,
+        battery: Int,
+        scaleMode: ScaleMode,
+        compatibility: Compatibility,
+    ): BuiltWatchface {
+        val resolvedMode = ScaleModeResolver.resolve(
+            scaleMode, document.canvasWidth, document.canvasHeight,
+        )
+        val donor = context.assets.open(DIGITAL_DONOR_ASSET).use { it.readBytes() }
+        check(donor.sha256() == DIGITAL_DONOR_SHA) { "Bundled digital donor hash mismatch" }
+        val files = unzip(donor)
+        DIGITAL_PINNED_HASHES.forEach { (path, hash) ->
+            check(files[path]?.sha256() == hash) { "Pinned digital donor file changed: $path" }
+        }
+        val runtime = context.assets.open(DIGITAL_RUNTIME_ASSET).use { it.readBytes() }
+
+        val slots = digitalSlots(document, resolvedMode)
+        val sequenceSlots = digitalSequenceSlots(document, resolvedMode)
+        val positions = MutableList(DigitalRuntimePatch.SLOT_COUNT) {
+            DigitalRuntimePatch.Position()
+        }
+        slots.forEach { slot ->
+            positions[slot.index] = DigitalRuntimePatch.Position(slot.x, slot.y)
+        }
+        val sequencePositions = MutableList(DigitalRuntimePatch.SEQUENCE_SLOT_COUNT) {
+            DigitalRuntimePatch.Position()
+        }
+        sequenceSlots.forEach { slot ->
+            sequencePositions[slot.index] = DigitalRuntimePatch.Position(slot.x, slot.y)
+        }
+        files[DIGITAL_MODULE_PATH] = DigitalRuntimePatch.apply(
+            runtime, positions, sequencePositions,
+        )
+        files.keys.filter { it.startsWith("ex/resource/$DIGITAL_MODULE/") }
+            .toList()
+            .forEach(files::remove)
+
+        val excluded = document.activeLayers
+            .filter {
+                it.type in setOf("time", "date", "dataLabel", "dataBar")
+            }
+            .mapTo(mutableSetOf()) { it.index }
+        val backgroundBitmap = renderStatic(
+            document, instant, 0, resolvedMode, excluded,
+        )
+        drawDigitalSeparators(backgroundBitmap, document, resolvedMode)
+        drawDigitalDataAffixes(backgroundBitmap, document, resolvedMode)
+        files["ex/resource/$DIGITAL_MODULE/background.bin"] = encodeEzip(backgroundBitmap)
+
+        val mainLayers = document.activeLayers
+            .filter(::isMainHand)
+            .associateBy { it.kind }
+        val hourKind = when {
+            mainLayers["twelveHours"] != null -> "twelveHours"
+            mainLayers["twentyFourhours"] != null -> "twentyFourhours"
+            else -> null
+        }
+        val hands = linkedMapOf<String, Bitmap>()
+        HAND_SPECS.filterKeys { it != "twentyFourhours" }.forEach { (kind, spec) ->
+            val sourceKind = if (kind == "twelveHours" && hourKind != null) hourKind else kind
+            val hand = mainLayers[sourceKind]?.let { fitHand(document, it, spec) }
+                ?: Bitmap.createBitmap(spec.width, spec.height, Bitmap.Config.ARGB_8888)
+            hands[kind] = hand
+            val suffix = when (kind) {
+                "twelveHours" -> "h"
+                "minute" -> "m"
+                else -> "s"
+            }
+            files["ex/resource/$DIGITAL_MODULE/main_$suffix.bin"] = rawResource(hand)
+        }
+        files["ex/resource/$DIGITAL_MODULE/center.bin"] = rawResource(
+            Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888),
+        )
+
+        val transparent = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+        repeat(DigitalRuntimePatch.SLOT_COUNT) { slotIndex ->
+            val slot = slots.firstOrNull { it.index == slotIndex }
+            val digits = slot?.let { digitAtlas(it.layer, document, resolvedMode) }
+                ?: List(10) { transparent }
+            digits.forEachIndexed { digit, bitmap ->
+                files["ex/resource/$DIGITAL_MODULE/s${slotIndex}_${digit}.bin"] =
+                    rawResource(bitmap)
+            }
+            if (slot != null) digits.forEach(Bitmap::recycle)
+        }
+        transparent.recycle()
+
+        repeat(DigitalRuntimePatch.SEQUENCE_SLOT_COUNT) { slotIndex ->
+            val slot = sequenceSlots.firstOrNull { it.index == slotIndex }
+            val frames = if (slot == null) {
+                val count = when (slotIndex) {
+                    0 -> 12
+                    1 -> 7
+                    else -> 11
+                }
+                List(count) {
+                    Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
+                }
+            } else {
+                digitalSequenceFrames(slot, document, resolvedMode)
+            }
+            frames.forEachIndexed { frameIndex, bitmap ->
+                files["ex/resource/$DIGITAL_MODULE/q${slotIndex}_${frameIndex}.bin"] =
+                    rawResource(bitmap)
+                bitmap.recycle()
+            }
+        }
+
+        val previewStatic = renderStatic(document, instant, battery, resolvedMode)
+        val previewBitmap = renderLiveViewport(previewStatic, hands, instant)
+        val thumbnail = Bitmap.createScaledBitmap(previewBitmap, 262, 316, true)
+        files["ex/installer_wf/${DIGITAL_MODULE}_tn.bin"] = encodeEzip(thumbnail)
+
+        val manifest = JSONObject()
+            .put("format", 4)
+            .put("builder", "mosaic-link-android")
+            .put("template_id", "clock2-live-digital-wf_clock443-v1")
+            .put("source_clock2_sha256", document.sourceSha256)
+            .put("runtime_sha256", runtime.sha256())
+            .put("runtime_patched_sha256", files.getValue(DIGITAL_MODULE_PATH).sha256())
+            .put("live_slots", JSONArray(slots.map { it.index }))
+            .put("live_sequence_slots", JSONArray(sequenceSlots.map { it.index }))
+            .put("watch_contacted", false)
+        val packageBytes = zip(files, "mosaic-link:${manifest}")
+
+        val panel = Bitmap.createBitmap(PANEL_WIDTH, PANEL_HEIGHT, Bitmap.Config.ARGB_8888)
+        Canvas(panel).apply {
+            drawColor(Color.BLACK)
+            drawBitmap(
+                previewBitmap,
+                ((PANEL_WIDTH - VIEWPORT_WIDTH) / 2).toFloat(),
+                ((PANEL_HEIGHT - VIEWPORT_HEIGHT) / 2).toFloat(),
+                null,
+            )
+        }
+        return BuiltWatchface(
+            displayName = document.name,
+            packageBytes = packageBytes,
+            previewPng = png(panel),
+            sourceSha256 = document.sourceSha256,
+            packageSha256 = packageBytes.sha256(),
+            fileCount = files.size,
+            warnings = compatibility.warnings +
+                "Live-digital runtime is offline-audited but still requires staged watch verification",
+            scaleMode = resolvedMode,
+            experimentalNativeRuntime = true,
+            runtimeLabel = "live digital runtime",
+        )
+    }
+
+    private fun digitalSlots(document: Clock2Document, mode: ScaleMode): List<DigitalSlot> {
+        val result = mutableListOf<DigitalSlot>()
+        val xScale = xScale(document, mode)
+        val yScale = yScale(document, mode)
+        val originX = (VIEWPORT_WIDTH - document.canvasWidth * xScale) / 2f
+        val originY = (VIEWPORT_HEIGHT - document.canvasHeight * yScale) / 2f
+        val centerX = originX + document.canvasWidth * xScale / 2f
+        val centerY = originY + document.canvasHeight * yScale / 2f
+
+        fun add(index: Int, layer: Clock2Layer, maxChars: Int, xOffsetChars: Float = 0f) {
+            val dimensions = digitDimensions(layer, document, mode)
+            val layerX = centerX + layer.x * xScale
+            val layerY = centerY + layer.y * yScale
+            val x = (layerX - maxChars * dimensions.first / 2f +
+                xOffsetChars * dimensions.first).roundToInt()
+            val y = (layerY - dimensions.second / 2f).roundToInt()
+            result += DigitalSlot(index, layer, maxChars, x.coerceIn(0, 600), y.coerceIn(0, 600))
+        }
+
+        val mainTime = document.activeLayers.firstOrNull {
+            it.type == "time" && normalizedTimePattern(it) in setOf("HH:mm", "H:mm")
+        }
+        if (mainTime != null) {
+            add(0, mainTime, 2, -1.5f)
+            add(1, mainTime, 2, 1.5f)
+        } else {
+            document.activeLayers.firstOrNull {
+                it.type == "time" && normalizedTimePattern(it) in setOf("H", "HH")
+            }?.let { add(0, it, 2) }
+            document.activeLayers.firstOrNull {
+                it.type == "time" && normalizedTimePattern(it) in setOf("MM", "mm")
+            }?.let { add(1, it, 2) }
+        }
+        document.activeLayers.firstOrNull {
+            it.type == "time" && normalizedTimePattern(it) == "ss"
+        }?.let { add(2, it, 2) }
+        document.activeLayers.firstOrNull {
+            it.type == "date" && it.dateFormat in setOf("D", "DD", "DAuto", "DDAuto")
+        }?.let { add(3, it, 2) }
+
+        val dataSlots = mapOf(
+            "battery" to (4 to 3),
+            "stepCount" to (5 to 4),
+            "activeEnergyBurned" to (6 to 3),
+            "heartRate" to (7 to 2),
+            "distanceWalkingRunning" to (8 to 2),
+        )
+        document.activeLayers.filter { it.type == "dataLabel" }.forEach { layer ->
+            dataSlots[layer.dataLabelKind]?.let { (index, maxChars) ->
+                add(index, layer, maxChars)
+            }
+        }
+        return result.distinctBy { it.index }
+    }
+
+    private fun digitalSequenceSlots(
+        document: Clock2Document,
+        mode: ScaleMode,
+    ): List<DigitalSequenceSlot> {
+        val xScale = xScale(document, mode)
+        val yScale = yScale(document, mode)
+        val originX = (VIEWPORT_WIDTH - document.canvasWidth * xScale) / 2f
+        val originY = (VIEWPORT_HEIGHT - document.canvasHeight * yScale) / 2f
+        val centerX = originX + document.canvasWidth * xScale / 2f
+        val centerY = originY + document.canvasHeight * yScale / 2f
+        val result = mutableListOf<DigitalSequenceSlot>()
+
+        fun add(index: Int, layer: Clock2Layer) {
+            val (width, height) = sequenceFrameDimensions(layer, document, mode)
+            val x = (centerX + layer.x * xScale - width / 2f).roundToInt()
+            val y = (centerY + layer.y * yScale - height / 2f).roundToInt()
+            result += DigitalSequenceSlot(
+                index, layer, x.coerceIn(0, 600), y.coerceIn(0, 600),
+            )
+        }
+
+        document.activeLayers.firstOrNull {
+            it.type == "date" && it.dateFormat in setOf("M", "MM", "ML", "MMM", "MMMM")
+        }?.let { add(0, it) }
+        document.activeLayers.firstOrNull {
+            it.type == "date" && it.dateFormat in setOf("DA", "DL")
+        }?.let { add(1, it) }
+        document.activeLayers.firstOrNull {
+            it.type == "dataBar" && it.dataBarFormat == "battery" &&
+                it.dataBarStyle == "dashed"
+        }?.let { add(2, it) }
+        return result
+    }
+
+    private fun digitalSequenceFrames(
+        slot: DigitalSequenceSlot,
+        document: Clock2Document,
+        mode: ScaleMode,
+    ): List<Bitmap> = when (slot.index) {
+        0 -> {
+            val values = when (slot.layer.dateFormat) {
+                "M" -> (1..12).map(Int::toString)
+                "MM" -> (1..12).map { "%02d".format(Locale.US, it) }
+                "MMM" -> listOf(
+                    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+                )
+                else -> listOf(
+                    "January", "February", "March", "April", "May", "June",
+                    "July", "August", "September", "October", "November", "December",
+                )
+            }
+            values.map { textSequenceFrame(slot.layer, it, document, mode) }
+        }
+        1 -> {
+            val values = if (slot.layer.dateFormat == "DA") {
+                listOf("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
+            } else {
+                listOf(
+                    "Sunday", "Monday", "Tuesday", "Wednesday",
+                    "Thursday", "Friday", "Saturday",
+                )
+            }
+            values.map { textSequenceFrame(slot.layer, it, document, mode) }
+        }
+        else -> (0..100 step 10).map { level ->
+            barSequenceFrame(slot.layer, level, document, mode)
+        }
+    }
+
+    private fun textSequenceFrame(
+        layer: Clock2Layer,
+        text: String,
+        document: Clock2Document,
+        mode: ScaleMode,
+    ): Bitmap {
+        val xScale = xScale(document, mode)
+        val yScale = yScale(document, mode)
+        val width = max(1, (layer.width * xScale).roundToInt())
+        val height = max(1, (layer.height * yScale).roundToInt())
+        return Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { bitmap ->
+            val x = when (layer.alignment) {
+                "left" -> 0f
+                "right" -> width.toFloat()
+                else -> width / 2f
+            }
+            drawTextLayer(Canvas(bitmap), text, layer, x, height / 2f, yScale)
+        }
+    }
+
+    private fun barSequenceFrame(
+        layer: Clock2Layer,
+        battery: Int,
+        document: Clock2Document,
+        mode: ScaleMode,
+    ): Bitmap {
+        val xScale = xScale(document, mode)
+        val yScale = yScale(document, mode)
+        val (width, height) = sequenceFrameDimensions(layer, document, mode)
+        return Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { bitmap ->
+            drawDataBar(
+                Canvas(bitmap), layer, battery, width / 2f, height / 2f, xScale, yScale,
+            )
+        }
+    }
+
+    private fun sequenceFrameDimensions(
+        layer: Clock2Layer,
+        document: Clock2Document,
+        mode: ScaleMode,
+    ): Pair<Int, Int> {
+        val width = layer.width * xScale(document, mode)
+        val height = layer.height * yScale(document, mode)
+        val radians = Math.toRadians(layer.rotation.toDouble())
+        val cos = kotlin.math.abs(kotlin.math.cos(radians)).toFloat()
+        val sin = kotlin.math.abs(kotlin.math.sin(radians)).toFloat()
+        return max(1, (width * cos + height * sin).roundToInt()) to
+            max(1, (width * sin + height * cos).roundToInt())
+    }
+
+    private fun normalizedTimePattern(layer: Clock2Layer): String =
+        when (layer.timeFormat) {
+            "Custom" -> layer.timeCustomFormat
+            "AMPM" -> "h:mm"
+            "24Hour" -> "HH:mm"
+            else -> layer.timeFormat
+        }
+
+    private fun digitDimensions(
+        layer: Clock2Layer,
+        document: Clock2Document,
+        mode: ScaleMode,
+    ): Pair<Int, Int> {
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            textSize = max(1f, layer.fontSize * yScale(document, mode))
+            typeface = layerTypeface(layer)
+        }
+        val width = (('0'..'9').maxOf { paint.measureText(it.toString()) } + 2f)
+            .roundToInt().coerceAtLeast(1)
+        val metrics = paint.fontMetrics
+        val height = (metrics.descent - metrics.ascent + 2f).roundToInt().coerceAtLeast(1)
+        return width to height
+    }
+
+    private fun digitAtlas(
+        layer: Clock2Layer,
+        document: Clock2Document,
+        mode: ScaleMode,
+    ): List<Bitmap> {
+        val (width, height) = digitDimensions(layer, document, mode)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = parseColor(layer.color)
+            textSize = max(1f, layer.fontSize * yScale(document, mode))
+            typeface = layerTypeface(layer)
+            textAlign = Paint.Align.CENTER
+            alpha = (layer.alpha * 255).roundToInt().coerceIn(0, 255)
+        }
+        val baseline = height / 2f - (paint.ascent() + paint.descent()) / 2f
+        return (0..9).map { digit ->
+            Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).also { bitmap ->
+                drawPaintedText(
+                    Canvas(bitmap), digit.toString(), width / 2f, baseline, paint, layer,
+                )
+            }
+        }
+    }
+
+    private fun drawDigitalSeparators(
+        bitmap: Bitmap,
+        document: Clock2Document,
+        mode: ScaleMode,
+    ) {
+        val layer = document.activeLayers.firstOrNull {
+            it.type == "time" && normalizedTimePattern(it) in setOf("HH:mm", "H:mm")
+        } ?: return
+        val xScale = xScale(document, mode)
+        val yScale = yScale(document, mode)
+        val centerX = (VIEWPORT_WIDTH - document.canvasWidth * xScale) / 2f +
+            document.canvasWidth * xScale / 2f
+        val centerY = (VIEWPORT_HEIGHT - document.canvasHeight * yScale) / 2f +
+            document.canvasHeight * yScale / 2f
+        drawTextLayer(
+            Canvas(bitmap), ":", layer,
+            centerX + layer.x * xScale, centerY + layer.y * yScale, yScale,
+        )
+    }
+
+    private fun drawDigitalDataAffixes(
+        bitmap: Bitmap,
+        document: Clock2Document,
+        mode: ScaleMode,
+    ) {
+        val xScale = xScale(document, mode)
+        val yScale = yScale(document, mode)
+        val centerX = (VIEWPORT_WIDTH - document.canvasWidth * xScale) / 2f +
+            document.canvasWidth * xScale / 2f
+        val centerY = (VIEWPORT_HEIGHT - document.canvasHeight * yScale) / 2f +
+            document.canvasHeight * yScale / 2f
+        val canvas = Canvas(bitmap)
+        document.activeLayers.filter { it.type == "dataLabel" }.forEach { layer ->
+            val digitWidth = digitDimensions(layer, document, mode).first.toFloat()
+            val x = centerX + layer.x * xScale
+            val y = centerY + layer.y * yScale
+            when (layer.dataLabelKind) {
+                "battery" -> drawTextLayer(canvas, "%", layer, x + digitWidth * 1.8f, y, yScale)
+                "stepCount" -> drawTextLayer(canvas, ",", layer, x - digitWidth, y, yScale)
+                "heartRate" -> drawTextLayer(canvas, " bpm", layer, x + digitWidth * 1.8f, y, yScale)
+                "distanceWalkingRunning" -> {
+                    drawTextLayer(canvas, ".", layer, x, y, yScale)
+                    drawTextLayer(canvas, "mi", layer, x + digitWidth * 1.75f, y, yScale)
+                }
+            }
+        }
+    }
+
     private fun renderStatic(
         document: Clock2Document,
         instant: ZonedDateTime,
         battery: Int,
         scaleMode: ScaleMode,
+        excludedLayerIndices: Set<Int> = emptySet(),
     ): Bitmap {
         val output = Bitmap.createBitmap(
             VIEWPORT_WIDTH, VIEWPORT_HEIGHT, Bitmap.Config.ARGB_8888,
@@ -197,7 +675,8 @@ class WatchfaceBuilder(private val context: Context) {
         val centerY = originY + scaledCanvasH / 2f
         // Capture all asset keys before BitmapFactory sees any buffers. Clock2
         // uses the filename as its deduplication/reference identity.
-        val cacheKeys = document.activeLayers
+        val renderedLayers = document.activeLayers.filter { it.index !in excludedLayerIndices }
+        val cacheKeys = renderedLayers
             .filter(::isRasterLayer)
             .filterNot(::isMainHand)
             .associate {
@@ -205,22 +684,31 @@ class WatchfaceBuilder(private val context: Context) {
             }
         val decodedImages = mutableMapOf<String, Bitmap>()
         try {
-            document.activeLayers.filterNot(::isMainHand).forEach { layer ->
+            renderedLayers.filterNot(::isMainHand).forEach { layer ->
                 val x = centerX + layer.x * xScale
                 val y = centerY + layer.y * yScale
                 when (layer.type) {
                     "date" -> {
                     val text = formatDate(layer, instant)
-                    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                        color = parseColor(layer.color)
-                        textSize = max(1f, layer.fontSize * yScale)
-                        typeface = Typeface.create("sans-serif-condensed", Typeface.NORMAL)
-                        textAlign = Paint.Align.CENTER
-                        alpha = (layer.alpha * 255).roundToInt().coerceIn(0, 255)
+                    drawTextLayer(canvas, text, layer, x, y, yScale)
                     }
-                    val baseline = y - (paint.ascent() + paint.descent()) / 2f
-                    canvas.drawText(text, x, baseline, paint)
+                    "time" -> {
+                    val text = formatTime(layer, instant)
+                    drawTextLayer(canvas, text, layer, x, y, yScale)
                     }
+                    "text" -> {
+                    drawTextLayer(canvas, layer.layerName, layer, x, y, yScale)
+                    }
+                    "dataLabel" -> drawTextLayer(
+                        canvas, formatDataLabel(layer, battery), layer, x, y, yScale,
+                    )
+                    "weather" -> drawWeather(
+                        canvas, layer, x, y, xScale, yScale,
+                    )
+                    "icon" -> drawIcon(canvas, layer, x, y, xScale, yScale)
+                    "dataBar" -> drawDataBar(
+                        canvas, layer, battery, x, y, xScale, yScale,
+                    )
                     "shape" -> drawShape(canvas, layer, x, y, xScale, yScale, resolved)
                     "image", "imageStrip", "video", "hand" -> {
                     val key = requireNotNull(cacheKeys[layer.index])
@@ -539,6 +1027,176 @@ class WatchfaceBuilder(private val context: Context) {
         }
     }
 
+    private fun formatDataLabel(layer: Clock2Layer, battery: Int): String =
+        when (layer.dataLabelKind) {
+            "battery" -> "${battery.coerceIn(0, 100)}%"
+            "stepCount" -> String.format(Locale.US, "%,d", 1_324)
+            "activeEnergyBurned" -> "300"
+            "heartRate" -> "70 bpm"
+            "distanceWalkingRunning" -> "1.2mi"
+            else -> ""
+        }
+
+    private fun drawWeather(
+        canvas: Canvas,
+        layer: Clock2Layer,
+        x: Float,
+        y: Float,
+        xScale: Float,
+        yScale: Float,
+    ) {
+        if (layer.weatherFormat == "weatherIcon") {
+            drawSunSymbol(canvas, layer, x, y, xScale, yScale)
+            return
+        }
+        val value = when (layer.weatherFormat) {
+            "city" -> "LONDON"
+            "sunset" -> "16:12"
+            "weatherDescription" -> "SUNNY"
+            "temperature" -> "22°C"
+            "chanceOfPrecip" -> "25%"
+            "windSpeed" -> "22 MPH"
+            else -> ""
+        }
+        drawTextLayer(canvas, value, layer, x, y, yScale)
+    }
+
+    private fun drawIcon(
+        canvas: Canvas,
+        layer: Clock2Layer,
+        x: Float,
+        y: Float,
+        xScale: Float,
+        yScale: Float,
+    ) {
+        val scale = min(xScale, yScale)
+        val size = max(5f, layer.fontSize * scale)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = parseColor(layer.color)
+            alpha = (layer.alpha * 255).roundToInt().coerceIn(0, 255)
+            style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND
+            strokeJoin = Paint.Join.ROUND
+            strokeWidth = max(1.5f, layer.iconThickness * scale / 2.5f)
+        }
+        canvas.save()
+        canvas.rotate(-layer.rotation, x, y)
+        when (layer.iconType) {
+            "umbrella_fill" -> {
+                val path = Path().apply {
+                    moveTo(x - size * .48f, y)
+                    quadTo(x, y - size * .62f, x + size * .48f, y)
+                    close()
+                }
+                paint.style = Paint.Style.FILL
+                canvas.drawPath(path, paint)
+                paint.style = Paint.Style.STROKE
+                canvas.drawLine(x, y, x, y + size * .38f, paint)
+                canvas.drawArc(
+                    RectF(x - size * .12f, y + size * .24f, x + size * .12f, y + size * .48f),
+                    0f, 105f, false, paint,
+                )
+            }
+            "sunset" -> {
+                canvas.drawLine(x - size * .5f, y + size * .2f, x + size * .5f, y + size * .2f, paint)
+                canvas.drawArc(
+                    RectF(x - size * .26f, y - size * .08f, x + size * .26f, y + size * .42f),
+                    180f, 180f, false, paint,
+                )
+                canvas.drawLine(x, y - size * .46f, x, y - size * .3f, paint)
+                canvas.drawLine(x - size * .36f, y - size * .28f, x - size * .25f, y - size * .17f, paint)
+                canvas.drawLine(x + size * .36f, y - size * .28f, x + size * .25f, y - size * .17f, paint)
+                canvas.drawLine(x - size * .38f, y + size * .38f, x + size * .38f, y + size * .38f, paint)
+            }
+            "tornado" -> {
+                repeat(4) { row ->
+                    val fraction = row / 3f
+                    val half = size * (.48f - fraction * .34f)
+                    val yy = y - size * .34f + row * size * .22f
+                    canvas.drawLine(x - half, yy, x + half, yy, paint)
+                }
+                canvas.drawLine(x - size * .08f, y + size * .34f, x + size * .03f, y + size * .48f, paint)
+            }
+        }
+        canvas.restore()
+    }
+
+    private fun drawSunSymbol(
+        canvas: Canvas,
+        layer: Clock2Layer,
+        x: Float,
+        y: Float,
+        xScale: Float,
+        yScale: Float,
+    ) {
+        val scale = min(xScale, yScale)
+        val diameter = max(8f, (layer.iconSize.takeIf { it > 0f } ?: layer.fontSize) * scale)
+        val radius = diameter * .25f
+        val rayStart = diameter * .37f
+        val rayEnd = diameter * .49f
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = parseColor(layer.color)
+            alpha = (layer.alpha * 255).roundToInt().coerceIn(0, 255)
+            strokeWidth = max(2f, diameter * .08f)
+            strokeCap = Paint.Cap.ROUND
+        }
+        canvas.drawCircle(x, y, radius, paint)
+        repeat(8) { index ->
+            val angle = Math.toRadians(index * 45.0)
+            canvas.drawLine(
+                x + (kotlin.math.cos(angle) * rayStart).toFloat(),
+                y + (kotlin.math.sin(angle) * rayStart).toFloat(),
+                x + (kotlin.math.cos(angle) * rayEnd).toFloat(),
+                y + (kotlin.math.sin(angle) * rayEnd).toFloat(),
+                paint,
+            )
+        }
+    }
+
+    private fun drawDataBar(
+        canvas: Canvas,
+        layer: Clock2Layer,
+        battery: Int,
+        x: Float,
+        y: Float,
+        xScale: Float,
+        yScale: Float,
+    ) {
+        val width = max(1f, layer.width * xScale)
+        val height = max(1f, layer.height * yScale)
+        val background = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = parseColor(layer.dataBarBackgroundColor)
+            alpha = (layer.alpha * 255).roundToInt().coerceIn(0, 255)
+            style = Paint.Style.FILL
+        }
+        val foreground = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = parseColor(layer.dataBarStartColor)
+            alpha = (layer.alpha * 255).roundToInt().coerceIn(0, 255)
+            style = Paint.Style.FILL
+        }
+        canvas.save()
+        canvas.rotate(-layer.rotation, x, y)
+        val bounds = RectF(x - width / 2f, y - height / 2f, x + width / 2f, y + height / 2f)
+        canvas.drawRect(bounds, background)
+        val segmentCount = 10
+        val gap = max(1f, (layer.dataBarDashPadding + 1f) * min(xScale, yScale))
+        val segmentHeight = (height - gap * (segmentCount - 1)) / segmentCount
+        val lit = battery.coerceIn(0, 100) / 10f
+        repeat(segmentCount) { index ->
+            val amount = (lit - index).coerceIn(0f, 1f)
+            if (amount <= 0f) return@repeat
+            val bottom = bounds.bottom - index * (segmentHeight + gap)
+            canvas.drawRect(
+                bounds.left,
+                bottom - segmentHeight * amount,
+                bounds.right,
+                bottom,
+                foreground,
+            )
+        }
+        canvas.restore()
+    }
+
     private fun formatDate(layer: Clock2Layer, instant: ZonedDateTime): String {
         if (layer.dateCustomFormat.isNotBlank()) {
             runCatching {
@@ -549,6 +1207,7 @@ class WatchfaceBuilder(private val context: Context) {
             "D", "DAuto" -> "d"
             "DD", "DDAuto" -> "dd"
             "DA" -> "EEE"
+            "DL" -> "EEEE"
             "DADD" -> "EEE dd"
             "M" -> "M"
             "MM" -> "MM"
@@ -557,6 +1216,80 @@ class WatchfaceBuilder(private val context: Context) {
             else -> "d"
         }
         return instant.format(DateTimeFormatter.ofPattern(pattern))
+    }
+
+    private fun formatTime(layer: Clock2Layer, instant: ZonedDateTime): String {
+        if (layer.timeFormat == "Custom" && layer.timeCustomFormat.isNotBlank()) {
+            return runCatching {
+                instant.format(DateTimeFormatter.ofPattern(layer.timeCustomFormat))
+            }.getOrDefault("--:--")
+        }
+        return when (layer.timeFormat) {
+            "AMPM" -> instant.format(DateTimeFormatter.ofPattern("h:mm a"))
+            "24Hour" -> instant.format(DateTimeFormatter.ofPattern("HH:mm"))
+            "H", "HH" -> instant.format(DateTimeFormatter.ofPattern(layer.timeFormat))
+            "MM", "mm" -> instant.format(DateTimeFormatter.ofPattern("mm"))
+            "ss" -> instant.format(DateTimeFormatter.ofPattern("ss"))
+            else -> instant.format(DateTimeFormatter.ofPattern("HH:mm"))
+        }
+    }
+
+    private fun drawTextLayer(
+        canvas: Canvas,
+        text: String,
+        layer: Clock2Layer,
+        x: Float,
+        y: Float,
+        yScale: Float,
+    ) {
+        if (text.isBlank()) return
+        val renderedText = when (layer.casing.lowercase(Locale.ROOT)) {
+            "uppercase" -> text.uppercase(Locale.getDefault())
+            "lowercase" -> text.lowercase(Locale.getDefault())
+            else -> text
+        }
+        val align = when (layer.alignment) {
+            "left" -> Paint.Align.LEFT
+            "right" -> Paint.Align.RIGHT
+            else -> Paint.Align.CENTER
+        }
+        val typeface = layerTypeface(layer)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = parseColor(layer.color)
+            textSize = max(1f, layer.fontSize * yScale)
+            this.typeface = typeface
+            textAlign = align
+            alpha = (layer.alpha * 255).roundToInt().coerceIn(0, 255)
+        }
+        val baseline = y - (paint.ascent() + paint.descent()) / 2f
+        drawPaintedText(canvas, renderedText, x, baseline, paint, layer)
+    }
+
+    private fun drawPaintedText(
+        canvas: Canvas,
+        text: String,
+        x: Float,
+        baseline: Float,
+        paint: Paint,
+        layer: Clock2Layer,
+    ) {
+        if (!layer.textEffect.equals("interlaced", ignoreCase = true)) {
+            canvas.drawText(text, x, baseline, paint)
+            return
+        }
+        val metrics = paint.fontMetrics
+        val top = baseline + metrics.ascent
+        val bottom = baseline + metrics.descent
+        val stripe = max(1f, paint.textSize / 28f)
+        val period = stripe * 2f
+        var lineTop = top
+        while (lineTop < bottom) {
+            canvas.save()
+            canvas.clipRect(0f, lineTop, canvas.width.toFloat(), min(bottom, lineTop + stripe))
+            canvas.drawText(text, x, baseline, paint)
+            canvas.restore()
+            lineTop += period
+        }
     }
 
     private fun imageDimensions(bytes: ByteArray): Pair<Int, Int> {

@@ -70,6 +70,53 @@ class Clock2CompatibilityTest {
     }
 
     @Test
+    fun appleStyleLiveDigitalTopologyIsAcceptedWithoutHands() {
+        val document = document(
+            layer(0, "image", image = byteArrayOf(1)),
+            layer(1, "time").copy(timeFormat = "Custom", timeCustomFormat = "HH:mm"),
+            layer(2, "time").copy(timeFormat = "Custom", timeCustomFormat = "ss"),
+            layer(3, "date", date = "DD"),
+            layer(4, "text").copy(layerName = "STEPS"),
+            layer(5, "dataLabel").copy(dataLabelKind = "stepCount"),
+            layer(6, "dataLabel").copy(dataLabelKind = "heartRate"),
+        )
+
+        val compatibility = Clock2Parser.compatibility(document)
+
+        assertTrue(compatibility.reasons.joinToString(), compatibility.supported)
+        assertFalse(compatibility.warnings.any { it.contains("placeholder", true) })
+        assertFalse(compatibility.warnings.any { it.contains("Digital time is baked") })
+    }
+
+    @Test
+    fun unknownDigitalFormatIsRejectedInsteadOfFrozen() {
+        val document = document(
+            layer(0, "image", image = byteArrayOf(1)),
+            layer(1, "time").copy(timeFormat = "Custom", timeCustomFormat = "HH:mm:ss.SSS"),
+        )
+
+        val compatibility = Clock2Parser.compatibility(document)
+
+        assertFalse(compatibility.supported)
+        assertTrue(compatibility.reasons.any { it.contains("HH:mm:ss.SSS") })
+    }
+
+    @Test
+    fun mixedAnalogAndDigitalRuntimeIsRejectedInsteadOfDroppingHands() {
+        val document = document(
+            layer(0, "image", image = byteArrayOf(1)),
+            layer(1, "time").copy(timeFormat = "Custom", timeCustomFormat = "HH:mm"),
+            layer(2, "hand", "twelveHours", image = byteArrayOf(1)),
+            layer(3, "hand", "minute", image = byteArrayOf(1)),
+        )
+
+        val compatibility = Clock2Parser.compatibility(document)
+
+        assertFalse(compatibility.supported)
+        assertTrue(compatibility.reasons.any { it.contains("Mixed analog") })
+    }
+
+    @Test
     fun localNagramCorpusRemainsStructurallyConvertibleWhenAvailable() {
         val corpus = System.getenv("CLOCK2_CORPUS")?.let(::File)
             ?.takeIf(File::isDirectory)
@@ -93,6 +140,44 @@ class Clock2CompatibilityTest {
                         (layer.imageData?.size ?: 0) > 16,
                     )
                 }
+            if (file.name.contains("APPLE DIGITAL", ignoreCase = true)) {
+                assertEquals(
+                    mapOf(
+                        "image" to 2, "weather" to 7, "icon" to 3,
+                        "date" to 3, "time" to 2, "dataBar" to 1,
+                        "text" to 7, "dataLabel" to 5,
+                    ),
+                    document.activeLayers.groupingBy { it.type }.eachCount(),
+                )
+                document.activeLayers
+                    .filter { it.type in setOf("time", "text") }
+                    .filter { it.fontName in setOf("EuromodeBold", "Acens") }
+                    .forEach { layer ->
+                        assertTrue(
+                            "${file.name} layer ${layer.index} did not resolve ${layer.fontName}",
+                            (layer.fontData?.size ?: 0) > 1_000,
+                        )
+                    }
+                val mainTime = document.activeLayers.single {
+                    it.type == "time" && it.timeCustomFormat == "HH:mm"
+                }
+                assertEquals("EuromodeBold", mainTime.fontName)
+                assertEquals("interlaced", mainTime.textEffect)
+                assertEquals(
+                    setOf(
+                        "weatherIcon", "city", "sunset", "weatherDescription",
+                        "temperature", "chanceOfPrecip", "windSpeed",
+                    ),
+                    document.activeLayers.filter { it.type == "weather" }
+                        .mapTo(mutableSetOf()) { it.weatherFormat },
+                )
+                val batteryBar = document.activeLayers.single { it.type == "dataBar" }
+                assertEquals("battery", batteryBar.dataBarFormat)
+                assertEquals("dashed", batteryBar.dataBarStyle)
+                assertTrue(
+                    compatibility.warnings.any { it.contains("offline face artwork") },
+                )
+            }
         }
     }
 

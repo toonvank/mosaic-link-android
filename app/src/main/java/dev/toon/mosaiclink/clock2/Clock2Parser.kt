@@ -53,7 +53,9 @@ object Clock2Parser {
             val raw = rawLayers.optJSONObject(index)
                 ?: throw IllegalArgumentException("Layer $index is not an object")
             val image = raw.optJSONObject("imageLayerSetting")
+            val text = raw.optJSONObject("textLayerSetting")
             val filename = image?.optString("filename").orEmpty()
+            val fontFilename = text?.optString("fontFilename").orEmpty()
             val encoded = if (image == null || image.isNull("imageData")) {
                 ""
             } else {
@@ -68,7 +70,15 @@ object Clock2Parser {
                     throw IllegalArgumentException("Layer $index contains invalid image data")
                 }
             }
-            if (filename.isNotBlank() && data != null) assets[filename] = data
+            if (data != null) {
+                if (filename.isNotBlank()) assets[filename] = data
+                // Clock2 commonly stores a shared font blob on a different
+                // layer (APPLE DIGITAL keeps Acens and Euromode on weather
+                // layers). Index that blob by the text setting's font file so
+                // every referencing time/text/data layer resolves the exact
+                // same typeface instead of silently falling back.
+                if (fontFilename.isNotBlank()) assets[fontFilename] = data
+            }
             decoded += data
         }
 
@@ -80,7 +90,17 @@ object Clock2Parser {
             val text = raw.optJSONObject("textLayerSetting")
             val imageStrip = raw.optJSONObject("imageStripLayerSetting")
             val shape = raw.optJSONObject("shapeLayerSetting")
+            val timeSetting = raw.optJSONObject("timeLayerSetting")
+            val dataLabelSetting = raw.optJSONObject("dataLabelLayerSetting")
+            val weatherSetting = raw.optJSONObject("weatherLayerSetting")
+            val iconSetting = raw.optJSONObject("iconLayerSetting")
+            val dataBarSetting = raw.optJSONObject("dataBarLayerSetting")
             val filename = image?.optString("filename").orEmpty()
+            val fontFilename = text?.optString("fontFilename").orEmpty()
+            val fontName = text?.optString("fontName").orEmpty()
+            val fontBytes = if (fontFilename.isNotBlank()) {
+                assets[fontFilename] ?: decoded[index]
+            } else null
             Clock2Layer(
                 index = index,
                 type = raw.optString("type", "unknown"),
@@ -92,9 +112,6 @@ object Clock2Parser {
                 alpha = raw.optDouble("alpha", 1.0).toFloat(),
                 rotation = raw.optDouble("rotAngle", 0.0).toFloat(),
                 hidden = raw.optBoolean("isHidden", false),
-                // Give every layer immutable ownership. Several Android vendor
-                // image decoders modify their input buffer, while Clock2 reuses
-                // one filename across multiple layers.
                 imageData = (decoded[index] ?: assets[filename])?.copyOf(),
                 imageFilename = filename,
                 color = raw.optString("colorHex", "#FFFFFFFF"),
@@ -112,6 +129,34 @@ object Clock2Parser {
                 outlineWidth = shape?.optDouble("outlineWidth", 0.0)?.toFloat() ?: 0f,
                 outlineColor = shape?.optString("outlineColorHex", "#FFFFFFFF")
                     ?: "#FFFFFFFF",
+                layerName = raw.optString("name", ""),
+                timeFormat = timeSetting?.optString("formatType").orEmpty(),
+                timeCustomFormat = timeSetting?.optString("customFormat").orEmpty(),
+                dataLabelKind = dataLabelSetting?.optString("kind").orEmpty(),
+                alignment = raw.optString("alignment", "center"),
+                fontData = fontBytes?.copyOf(),
+                fontName = fontName,
+                casing = text?.optString("casingType", "unmodified") ?: "unmodified",
+                textEffect = text?.optString("effect", "none") ?: "none",
+                textEffectModifier = text?.optDouble("effectModifier", 0.0)?.toFloat() ?: 0f,
+                detailLevel = text?.optString("detailLevel", "unmodified") ?: "unmodified",
+                weatherFormat = weatherSetting?.optString("formatType").orEmpty(),
+                iconType = iconSetting?.optString("type").orEmpty(),
+                iconThickness = iconSetting?.optInt("thickness", 0) ?: 0,
+                iconSize = raw.optDouble("iconSize", 0.0).toFloat(),
+                dataBarFormat = dataBarSetting?.optString("format").orEmpty(),
+                dataBarStyle = dataBarSetting?.optString("style").orEmpty(),
+                dataBarStartColor = dataBarSetting?.optString(
+                    "startColorHex", "#FFFFFFFF",
+                ) ?: "#FFFFFFFF",
+                dataBarEndColor = dataBarSetting?.optString(
+                    "endColorHex", "#FFFFFFFF",
+                ) ?: "#FFFFFFFF",
+                dataBarBackgroundColor = dataBarSetting?.optString(
+                    "backgroundColorHex", "#FFFFFF00",
+                ) ?: "#FFFFFF00",
+                dataBarDashPadding = dataBarSetting?.optDouble("dashPadding", 0.0)
+                    ?.toFloat() ?: 0f,
             )
         }
 
@@ -129,7 +174,17 @@ object Clock2Parser {
         val reasons = mutableListOf<String>()
         val warnings = linkedSetOf<String>()
         val active = document.activeLayers
+        val liveDigital = active.any { it.type == "time" }
         active.forEach { layer ->
+            if (layer.type in setOf("date", "time", "text", "dataLabel", "weather") &&
+                layer.textEffect !in setOf("", "none", "interlaced")
+            ) {
+                if (liveDigital) {
+                    reasons += "Layer ${layer.index}: text effect '${layer.textEffect}' is not supported"
+                } else {
+                    warnings += "Text effect '${layer.textEffect}' is flattened without animation"
+                }
+            }
             when (layer.type) {
                 "image" -> if (layer.imageData == null) {
                     reasons += "Layer ${layer.index}: image asset is missing"
@@ -149,13 +204,19 @@ object Clock2Parser {
                     if (layer.dateFormat.isBlank() && layer.dateCustomFormat.isBlank()) {
                         reasons += "Layer ${layer.index}: date format is missing"
                     } else if (layer.dateFormat !in setOf(
-                            "D", "DD", "DAuto", "DDAuto", "DA", "DADD",
-                            "M", "MM", "ML", "MMM", "MMMM",
+                            "D", "DD", "DAuto", "DDAuto", "DA",
+                            "DL", "M", "MM", "ML", "MMM", "MMMM",
                         )
                     ) {
-                        warnings += "Unknown date formats are approximated in the static background"
+                        if (liveDigital) {
+                            reasons += "Layer ${layer.index}: live date format '${layer.dateFormat}' is not supported"
+                        } else {
+                            warnings += "Unknown date formats are approximated in the static background"
+                        }
                     }
-                    warnings += "Date layers show the value from installation time"
+                    if (!liveDigital) {
+                        warnings += "This date layer shows the value from installation time"
+                    }
                 }
                 "imageStrip" -> {
                     if (layer.imageData == null) {
@@ -172,11 +233,73 @@ object Clock2Parser {
                     }
                 }
                 "shape" -> Unit
-                "text" -> warnings += "Visible text layers without raster assets are omitted"
-                "icon", "dataLabel", "weather", "dataRing", "dataBar", "time",
-                "calendar", "chart", "ring", "button", "homeKit" ->
-                    warnings += "Live sensor, weather, and digital data layers are omitted"
-                else -> warnings += "Unknown layer types are omitted"
+                "text" -> Unit
+                "time" -> {
+                    val pattern = when (layer.timeFormat) {
+                        "Custom" -> layer.timeCustomFormat
+                        "AMPM" -> "h:mm"
+                        "24Hour" -> "HH:mm"
+                        else -> layer.timeFormat
+                    }
+                    if (pattern !in setOf("HH:mm", "H:mm", "H", "HH", "MM", "mm", "ss")) {
+                        reasons += "Layer ${layer.index}: live time format '$pattern' is not supported"
+                    }
+                }
+                "dataLabel" -> {
+                    if (!liveDigital) {
+                        warnings += "Live data labels require a digital-time layer and are omitted"
+                    } else if (layer.dataLabelKind !in setOf(
+                            "battery", "stepCount", "activeEnergyBurned",
+                            "heartRate", "distanceWalkingRunning",
+                        )
+                    ) {
+                        reasons += "Layer ${layer.index}: live data '${layer.dataLabelKind}' has no verified HK8 source"
+                    }
+                }
+                "weather" -> {
+                    val supportedWeather = setOf(
+                        "weatherIcon", "city", "sunset", "weatherDescription",
+                        "temperature", "chanceOfPrecip", "windSpeed",
+                    )
+                    if (!liveDigital) {
+                        warnings += "Live weather layers are omitted from analog packages"
+                    } else if (layer.weatherFormat !in supportedWeather) {
+                        reasons += "Layer ${layer.index}: live weather '${layer.weatherFormat}' is not supported"
+                    } else {
+                        warnings += "Weather is retained as offline face artwork and does not update"
+                    }
+                }
+                "icon" -> {
+                    val supportedIcons = setOf("tornado", "sunset", "umbrella_fill")
+                    if (!liveDigital) {
+                        warnings += "Symbol layers are omitted from analog packages"
+                    } else if (layer.iconType !in supportedIcons) {
+                        reasons += "Layer ${layer.index}: symbol '${layer.iconType}' is not supported"
+                    }
+                }
+                "dataBar" -> {
+                    if (!liveDigital) {
+                        warnings += "Live data bars are omitted from analog packages"
+                    } else if (layer.dataBarFormat != "battery" ||
+                        layer.dataBarStyle != "dashed"
+                    ) {
+                        reasons += "Layer ${layer.index}: only a dashed live battery bar is supported"
+                    }
+                }
+                "dataRing", "calendar", "chart", "ring", "button", "homeKit" -> {
+                    if (liveDigital) {
+                        reasons += "Layer ${layer.index}: visible ${layer.type} layers are not supported"
+                    } else {
+                        warnings += "Live ${layer.type} layers are omitted from analog packages"
+                    }
+                }
+                else -> {
+                    if (liveDigital) {
+                        reasons += "Layer ${layer.index}: unknown visible layer type '${layer.type}'"
+                    } else {
+                        warnings += "Unknown layer types are omitted"
+                    }
+                }
             }
         }
 
@@ -209,12 +332,29 @@ object Clock2Parser {
         if (requirements.backgroundImages < 1) {
             reasons += "A Clock2 background image is required"
         }
+        val digitalPatterns = active.filter { it.type == "time" }.map { layer ->
+            when (layer.timeFormat) {
+                "Custom" -> layer.timeCustomFormat
+                "AMPM" -> "h:mm"
+                "24Hour" -> "HH:mm"
+                else -> layer.timeFormat
+            }
+        }
+        if (liveDigital && digitalPatterns.none { it in setOf("HH:mm", "H:mm") } &&
+            !(digitalPatterns.any { it in setOf("H", "HH") } &&
+                digitalPatterns.any { it in setOf("MM", "mm") })
+        ) {
+            reasons += "A live digital face requires an HH:mm time layer"
+        }
         val centralHands = hands
             .filter { round3(it.x) == 0 && round3(it.y) == 0 }
             .groupingBy { it.kind }
             .eachCount()
         val hasHands = hands.isNotEmpty()
-        if (hasHands) {
+        if (liveDigital && hasHands) {
+            reasons += "Mixed analog hands and live digital layers are not supported by the digital runtime"
+        }
+        if (hasHands && !liveDigital) {
             val hourKind = when {
                 centralHands["twelveHours"] != null -> "twelveHours"
                 centralHands["twentyFourhours"] != null -> "twentyFourhours"
@@ -234,8 +374,46 @@ object Clock2Parser {
                 reasons += "At most one central seconds hand is supported"
             }
         }
-        if (hasHands && (centralHands["seconds"] ?: 0) == 0) {
+        if (hasHands && !liveDigital && (centralHands["seconds"] ?: 0) == 0) {
             warnings += "The missing central seconds hand will be transparent"
+        }
+        if (liveDigital) {
+            fun rejectDuplicates(label: String, count: Int) {
+                if (count > 1) reasons += "Only one live $label layer is supported"
+            }
+            rejectDuplicates(
+                "combined time",
+                digitalPatterns.count { it in setOf("HH:mm", "H:mm") },
+            )
+            rejectDuplicates("hour", digitalPatterns.count { it in setOf("H", "HH") })
+            rejectDuplicates("minute", digitalPatterns.count { it in setOf("MM", "mm") })
+            rejectDuplicates("seconds", digitalPatterns.count { it == "ss" })
+            if (digitalPatterns.any { it in setOf("HH:mm", "H:mm") } &&
+                digitalPatterns.any { it in setOf("H", "HH", "MM", "mm") }
+            ) {
+                reasons += "A combined time layer cannot be mixed with separate hour/minute layers"
+            }
+            rejectDuplicates(
+                "day",
+                active.count {
+                    it.type == "date" && it.dateFormat in setOf("D", "DD", "DAuto", "DDAuto")
+                },
+            )
+            rejectDuplicates(
+                "month",
+                active.count {
+                    it.type == "date" && it.dateFormat in setOf("M", "MM", "ML", "MMM", "MMMM")
+                },
+            )
+            rejectDuplicates(
+                "weekday",
+                active.count { it.type == "date" && it.dateFormat in setOf("DA", "DL") },
+            )
+            active.filter { it.type == "dataLabel" }
+                .groupingBy { it.dataLabelKind }
+                .eachCount()
+                .forEach { (kind, count) -> rejectDuplicates("$kind data", count) }
+            rejectDuplicates("battery bar", active.count { it.type == "dataBar" })
         }
         return Compatibility(
             supported = reasons.isEmpty(),

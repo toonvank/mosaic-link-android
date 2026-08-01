@@ -185,18 +185,34 @@ private fun MosaicLinkScreen(
             title = { Text("Protect the active face") },
             text = {
                 Text(
-                    "On the watch, select a different official stock face and leave " +
-                        "the screen awake. Also close Wearfit so it does not compete " +
-                        "for the Bluetooth connection.\n\nThis local experiment patches " +
-                        "the official face-23 display geometry to 485×520. Keep the " +
-                        "known-good stock face available for recovery.",
+                    if (state.builtFace?.experimentalNativeRuntime == true) {
+                        "This digital face uses a new clean native runtime. Its ABI and " +
+                            "package are offline-audited, but it has not completed staged " +
+                            "activation testing on this watch yet. A boot loop is possible.\n\n" +
+                            "Select a different official stock face, keep the watch awake, " +
+                            "close Wearfit, and keep the known-good recovery face available."
+                    } else {
+                        "On the watch, select a different official stock face and leave " +
+                            "the screen awake. Also close Wearfit so it does not compete " +
+                            "for the Bluetooth connection.\n\nThis local experiment patches " +
+                            "the official face-23 display geometry to 485×520. Keep the " +
+                            "known-good stock face available for recovery."
+                    },
                 )
             },
             confirmButton = {
                 Button(onClick = {
                     installDialog = false
                     onInstall()
-                }) { Text("Safe face is active") }
+                }) {
+                    Text(
+                        if (state.builtFace?.experimentalNativeRuntime == true) {
+                            "I accept staged test risk"
+                        } else {
+                            "Safe face is active"
+                        },
+                    )
+                }
             },
             dismissButton = {
                 TextButton(onClick = { installDialog = false }) { Text("Cancel") }
@@ -475,12 +491,16 @@ private fun WatchfaceCard(
                         )
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            "${face.fileCount} files • full-panel geometry patch",
+                            if (face.experimentalNativeRuntime) {
+                                "${face.fileCount} files • live digital package"
+                            } else {
+                                "${face.fileCount} files • full-panel geometry patch"
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Text(
-                            "Target: stock face 23 • local experiment",
+                            "Target: ${face.runtimeLabel} • local experiment",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
