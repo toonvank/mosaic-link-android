@@ -1,24 +1,25 @@
 package dev.toon.mosaiclink.clock2
 
 /**
- * Quarantined, byte-exact patch for the bundled official wf_clock23 module.
+ * Byte-exact geometry patch for the bundled official wf_clock23 module.
  *
- * The stock module hard-codes a 410x494 root and an analog center of (205, 247).
- * This changes those geometry values and disables page glue for that oversized
- * root. Without the latter, LVGL treats it as a pannable page. Its lifecycle,
- * imports, resource paths, and executable size remain untouched.
+ * A physical HK8 grid test reported roughly 434 visible horizontal pixels,
+ * while the stock module creates a 410x494 root centered at (205,247). The
+ * previous 485x520 experiment overflowed on the watch. This conservative
+ * profile preserves the proven 494-pixel height and changes only the visible
+ * width to 434, with the analog center moved to (217,247).
  */
-internal object WfClock23FullPanelPatch {
+internal object WfClock23VisiblePanelPatch {
     const val OUTPUT_SHA256 =
-        "0032e2bef7dad5fc80d760d02a76f1a68bfe1f99733386c82dc1d0540975784e"
+        "0f9fde1e39375103aef22090b810f6d8fb78b95c273cc501d02779fa03c08bf4"
 
     private val STOCK_ROOT_INSTRUCTIONS = byteArrayOf(
         0x4f, 0xf4.toByte(), 0xf7.toByte(), 0x72,
         0x4f, 0xf4.toByte(), 0xcd.toByte(), 0x71,
     )
-    private val FULL_PANEL_ROOT_INSTRUCTIONS = byteArrayOf(
-        0x4f, 0xf4.toByte(), 0x02, 0x72,
-        0x40, 0xf2.toByte(), 0xe5.toByte(), 0x11,
+    private val VISIBLE_PANEL_ROOT_INSTRUCTIONS = byteArrayOf(
+        0x4f, 0xf4.toByte(), 0xf7.toByte(), 0x72,
+        0x4f, 0xf4.toByte(), 0xd9.toByte(), 0x71,
     )
     private val STOCK_ANALOG_CONFIG = byteArrayOf(
         0x05, 0x00,
@@ -27,10 +28,10 @@ internal object WfClock23FullPanelPatch {
         0x00, 0x00,
         0xec.toByte(), 0x09, 0x00, 0x00,
     )
-    private val FULL_PANEL_ANALOG_CONFIG = byteArrayOf(
+    private val VISIBLE_PANEL_ANALOG_CONFIG = byteArrayOf(
         0x05, 0x00,
-        0xf2.toByte(), 0x00,
-        0x04, 0x01,
+        0xd9.toByte(), 0x00,
+        0xf7.toByte(), 0x00,
         0x00, 0x00,
         0xec.toByte(), 0x09, 0x00, 0x00,
     )
@@ -54,13 +55,13 @@ internal object WfClock23FullPanelPatch {
         replaceExactlyOnce(
             output,
             STOCK_ROOT_INSTRUCTIONS,
-            FULL_PANEL_ROOT_INSTRUCTIONS,
+            VISIBLE_PANEL_ROOT_INSTRUCTIONS,
             "stock root-size instructions",
         )
         replaceExactlyOnce(
             output,
             STOCK_ANALOG_CONFIG,
-            FULL_PANEL_ANALOG_CONFIG,
+            VISIBLE_PANEL_ANALOG_CONFIG,
             "stock analog-center config",
         )
         replaceExactlyOnce(
@@ -70,7 +71,7 @@ internal object WfClock23FullPanelPatch {
             "stock page-glue call",
         )
         check(output.sha256() == OUTPUT_SHA256) {
-            "Full-panel native patch did not produce the pinned module"
+            "Visible-panel native patch did not produce the pinned module"
         }
         return output
     }

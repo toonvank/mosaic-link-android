@@ -39,10 +39,10 @@ class WatchfaceBuilder(private val context: Context) {
     )
 
     companion object {
-        const val VIEWPORT_WIDTH = 410
+        const val VIEWPORT_WIDTH = 434
         const val VIEWPORT_HEIGHT = 494
-        const val PANEL_WIDTH = 485
-        const val PANEL_HEIGHT = 520
+        const val PANEL_WIDTH = VIEWPORT_WIDTH
+        const val PANEL_HEIGHT = VIEWPORT_HEIGHT
         private const val MODULE = "wf_clock23"
         private const val MODULE_PATH = "ex/installer_wf/wf_clock23.so"
         private const val DONOR_ASSET = "stock_wf_clock23.zip"
@@ -84,15 +84,13 @@ class WatchfaceBuilder(private val context: Context) {
         document: Clock2Document,
         instant: ZonedDateTime = ZonedDateTime.now(),
         battery: Int = 73,
-        scaleMode: ScaleMode = ScaleMode.AUTO,
+        scaleMode: ScaleMode = ScaleMode.CONTAIN,
     ): BuiltWatchface {
         val compatibility = Clock2Parser.compatibility(document)
         require(compatibility.supported) {
             compatibility.reasons.joinToString("; ")
         }
-        val resolvedMode = ScaleModeResolver.resolve(
-            scaleMode, document.canvasWidth, document.canvasHeight,
-        )
+        val resolvedMode = resolveScaleMode(scaleMode, document)
         val donor = context.assets.open(DONOR_ASSET).use { it.readBytes() }
         check(donor.sha256() == DONOR_SHA) { "Bundled stock donor hash mismatch" }
         val files = unzip(donor)
@@ -100,7 +98,9 @@ class WatchfaceBuilder(private val context: Context) {
         PINNED_HASHES.forEach { (path, hash) ->
             check(files[path]?.sha256() == hash) { "Pinned stock file changed: $path" }
         }
-        files[MODULE_PATH] = files.getValue(MODULE_PATH)
+        files[MODULE_PATH] = WfClock23VisiblePanelPatch.apply(
+            files.getValue(MODULE_PATH),
+        )
 
         val static = renderStatic(document, instant, battery, resolvedMode)
         val mainLayers = document.activeLayers
@@ -131,12 +131,14 @@ class WatchfaceBuilder(private val context: Context) {
         val manifest = JSONObject()
             .put("format", 3)
             .put("builder", "mosaic-link-android")
-            .put("template_id", "clock2-stock-binary-wf_clock23")
+            .put("template_id", "clock2-stock-binary-wf_clock23-visible-panel-434x494")
             .put("source_clock2_sha256", document.sourceSha256)
             .put("stock_native_sha256", PINNED_HASHES.getValue(
                 MODULE_PATH,
             ))
+            .put("output_native_sha256", WfClock23VisiblePanelPatch.OUTPUT_SHA256)
             .put("modified_paths", JSONArray(listOf(
+                MODULE_PATH,
                 "ex/installer_wf/wf_clock23_tn.bin",
                 "ex/resource/wf_clock23/wf_clock23_bg.bin",
                 "ex/resource/wf_clock23/wf_clock23_h.bin",
@@ -182,7 +184,7 @@ class WatchfaceBuilder(private val context: Context) {
         )
         val canvas = Canvas(output)
         canvas.drawColor(Color.BLACK)
-        val resolved = ScaleModeResolver.resolve(scaleMode, document.canvasWidth, document.canvasHeight)
+        val resolved = resolveScaleMode(scaleMode, document)
         val xScale = xScale(document, resolved)
         val yScale = yScale(document, resolved)
         val scaledCanvasW = document.canvasWidth * xScale
@@ -329,7 +331,7 @@ class WatchfaceBuilder(private val context: Context) {
         val bytes = requireNotNull(layer.imageData) {
             "Layer ${layer.index} has no embedded image"
         }
-        val resolved = ScaleModeResolver.resolve(scaleMode, document.canvasWidth, document.canvasHeight)
+        val resolved = resolveScaleMode(scaleMode, document)
         val targetWidth = max(1, (layer.width * xScale(document, resolved)).roundToInt())
         val targetHeight = max(1, (layer.height * yScale(document, resolved)).roundToInt())
         if (layer.type == "video") {
@@ -370,15 +372,17 @@ class WatchfaceBuilder(private val context: Context) {
             source.recycle()
             source = frame
         }
-        // This experiment maps the *complete* Clock2 composition onto the
-        // full panel. Scaling only the background left dials and overlays in
-        // the old coordinate system, which looked zoomed/misaligned. Applying
-        // the same two-axis transform to every raster layer keeps their
-        // relative geometry intact and avoids hidden contain/crop padding.
+        // Apply one composition transform to every raster layer. Fitting only
+        // the background leaves dials and overlays in the old coordinate
+        // system, which makes otherwise intact faces look misregistered.
         val scaled = if (scaleMode == ScaleMode.STRETCH || scaleMode == ScaleMode.STRETCH_H) {
             Bitmap.createScaledBitmap(source, targetWidth, targetHeight, true)
         } else {
-            placeInFrame(source, targetWidth, targetHeight, if (scaleMode == ScaleMode.COVER) "fill" else layer.contentMode)
+            // COVER is already applied by the composition-wide x/y scale and
+            // the viewport canvas clips only its outer edges. Forcing "fill"
+            // here crops every individual asset (notably small subdials) and
+            // destroys their internal geometry.
+            placeInFrame(source, targetWidth, targetHeight, layer.contentMode)
         }
         source.recycle()
         return scaled
@@ -390,7 +394,7 @@ class WatchfaceBuilder(private val context: Context) {
         instant: ZonedDateTime,
         scaleMode: ScaleMode,
     ): String {
-        val resolved = ScaleModeResolver.resolve(scaleMode, document.canvasWidth, document.canvasHeight)
+        val resolved = resolveScaleMode(scaleMode, document)
         val targetWidth = max(1, (layer.width * xScale(document, resolved)).roundToInt())
         val targetHeight = max(1, (layer.height * yScale(document, resolved)).roundToInt())
         val assetIdentity = layer.imageFilename.ifBlank {
@@ -634,8 +638,13 @@ class WatchfaceBuilder(private val context: Context) {
                 spec.height,
             )
         }
-        PINNED_HASHES.forEach { (path, hash) ->
-            check(files[path]?.sha256() == hash) { "Pinned byte changed: $path" }
+        PINNED_HASHES.forEach { (path, stockHash) ->
+            val expected = if (path == MODULE_PATH) {
+                WfClock23VisiblePanelPatch.OUTPUT_SHA256
+            } else {
+                stockHash
+            }
+            check(files[path]?.sha256() == expected) { "Pinned byte changed: $path" }
         }
     }
 
@@ -709,6 +718,15 @@ class WatchfaceBuilder(private val context: Context) {
             )
             ScaleMode.AUTO -> VIEWPORT_WIDTH / document.canvasWidth
         }
+
+    private fun resolveScaleMode(mode: ScaleMode, document: Clock2Document): ScaleMode =
+        ScaleModeResolver.resolve(
+            mode = mode,
+            canvasWidth = document.canvasWidth,
+            canvasHeight = document.canvasHeight,
+            targetWidth = VIEWPORT_WIDTH.toFloat(),
+            targetHeight = VIEWPORT_HEIGHT.toFloat(),
+        )
 
     private fun yScale(document: Clock2Document, mode: ScaleMode = ScaleMode.STRETCH): Float =
         when (mode) {

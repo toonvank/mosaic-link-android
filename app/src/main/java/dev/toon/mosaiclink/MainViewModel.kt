@@ -34,7 +34,7 @@ data class MosaicUiState(
     val document: Clock2Document? = null,
     val compatibility: Compatibility? = null,
     val builtFace: BuiltWatchface? = null,
-    val scaleMode: ScaleMode = ScaleMode.AUTO,
+    val scaleMode: ScaleMode = ScaleMode.CONTAIN,
     val phase: String? = null,
     val uploadProgress: UploadProgress? = null,
     val busy: Boolean = false,
@@ -68,7 +68,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             viewModelScope.launch {
                 runBusy("Restoring last Clock2 file…") {
                     val bytes = withContext(Dispatchers.IO) { cached.readBytes() }
-                    processClock2(name, bytes, persist = false, ScaleMode.AUTO)
+                    processClock2(name, bytes, persist = false, ScaleMode.CONTAIN)
                 }
             }
         }
@@ -135,7 +135,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         fileName: String,
         bytes: ByteArray,
         persist: Boolean,
-        scaleMode: ScaleMode = ScaleMode.AUTO,
+        scaleMode: ScaleMode = ScaleMode.CONTAIN,
         cachedDocument: Clock2Document? = null,
     ) {
         updatePhase("Checking layer topology…")

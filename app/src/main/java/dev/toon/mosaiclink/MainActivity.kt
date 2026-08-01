@@ -16,6 +16,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -188,8 +189,9 @@ private fun MosaicLinkScreen(
                     "On the watch, select a different official stock face and leave " +
                         "the screen awake. Also close Wearfit so it does not compete " +
                         "for the Bluetooth connection.\n\nThis local experiment patches " +
-                        "the official face-23 display geometry to 485×520. Keep the " +
-                        "known-good stock face available for recovery.",
+                        "the official face-23 display geometry from 410×494 to the " +
+                        "XDA-measured 434×494 visible area. Keep the known-good " +
+                        "stock face available for recovery.",
                 )
             },
             confirmButton = {
@@ -450,9 +452,10 @@ private fun WatchfaceCard(
                     Image(
                         bitmap = bitmap,
                         contentDescription = "Watchface preview",
-                        contentScale = ContentScale.Crop,
+                        contentScale = ContentScale.Fit,
                         modifier = Modifier
-                            .size(width = 126.dp, height = 136.dp)
+                            .width(126.dp)
+                            .aspectRatio(bitmap.width.toFloat() / bitmap.height)
                             .clip(RoundedCornerShape(24.dp))
                             .background(Color.Black),
                     )
@@ -475,12 +478,14 @@ private fun WatchfaceCard(
                         )
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            "${face.fileCount} files • full-panel geometry patch",
+                            "${face.fileCount} files • measured 434×494 profile",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         Text(
-                            "Target: stock face 23 • local experiment",
+                            "Source: ${state.document?.canvasWidth?.toInt()}×" +
+                                "${state.document?.canvasHeight?.toInt()} • " +
+                                "fit: ${face.scaleMode.label.lowercase()}",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -540,12 +545,19 @@ private fun WatchfaceCard(
                             enabled = !state.busy,
                             modifier = Modifier.fillMaxWidth(),
                         ) {
-                            Text("Fit: ${state.builtFace.scaleMode.name.lowercase()}")
+                            Text(
+                                state.builtFace.scaleMode.label,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         }
                         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
-                            dev.toon.mosaiclink.clock2.ScaleMode.entries.forEach { mode ->
+                            listOf(
+                                dev.toon.mosaiclink.clock2.ScaleMode.CONTAIN,
+                                dev.toon.mosaiclink.clock2.ScaleMode.COVER,
+                            ).forEach { mode ->
                                 DropdownMenuItem(
-                                    text = { Text(mode.name.lowercase().replaceFirstChar { it.uppercase() }) },
+                                    text = { Text(mode.label) },
                                     onClick = {
                                         expanded = false
                                         onScaleMode(mode)

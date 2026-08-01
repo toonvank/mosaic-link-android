@@ -7,19 +7,19 @@ import org.junit.Test
 import java.io.File
 import java.util.zip.ZipFile
 
-class WfClock23FullPanelPatchTest {
+class WfClock23VisiblePanelPatchTest {
     @Test
-    fun bundledOfficialModuleProducesPinnedFullPanelElf() {
+    fun bundledOfficialModuleProducesPinnedVisiblePanelElf() {
         val donor = File("src/main/assets/stock_wf_clock23.zip")
         assertTrue("Bundled donor is missing", donor.isFile)
         val stock = ZipFile(donor).use { zip ->
             zip.getInputStream(zip.getEntry("ex/installer_wf/wf_clock23.so")).readBytes()
         }
 
-        val patched = WfClock23FullPanelPatch.apply(stock)
+        val patched = WfClock23VisiblePanelPatch.apply(stock)
 
         assertEquals(stock.size, patched.size)
-        assertEquals(WfClock23FullPanelPatch.OUTPUT_SHA256, patched.sha256())
+        assertEquals(WfClock23VisiblePanelPatch.OUTPUT_SHA256, patched.sha256())
         assertFalse(stock.contentEquals(patched))
         assertEquals(0x7f, patched[0].toInt())
         assertEquals('E'.code, patched[1].toInt())
@@ -29,6 +29,6 @@ class WfClock23FullPanelPatchTest {
 
     @Test(expected = IllegalStateException::class)
     fun refusesAnUnknownModule() {
-        WfClock23FullPanelPatch.apply(ByteArray(3416))
+        WfClock23VisiblePanelPatch.apply(ByteArray(3416))
     }
 }
