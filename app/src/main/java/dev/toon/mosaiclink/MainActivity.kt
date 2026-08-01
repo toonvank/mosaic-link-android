@@ -86,7 +86,6 @@ import dev.toon.mosaiclink.ble.BleConnectionState
 import dev.toon.mosaiclink.ble.Hk8Device
 import dev.toon.mosaiclink.catalog.CatalogScreen
 import dev.toon.mosaiclink.catalog.CatalogViewModel
-import dev.toon.mosaiclink.catalog.SavedFace
 import dev.toon.mosaiclink.ui.MosaicTheme
 
 class MainActivity : ComponentActivity() {
@@ -117,6 +116,10 @@ class MainActivity : ComponentActivity() {
                 val state by viewModel.state.collectAsState()
                 val currentScreen = state.currentScreen
                 val snackbar = remember { SnackbarHostState() }
+
+                LaunchedEffect(currentScreen) {
+                    if (currentScreen == "catalog") catalogViewModel.refreshSaved()
+                }
 
                 LaunchedEffect(state.error) {
                     state.error?.let {
@@ -161,7 +164,7 @@ class MainActivity : ComponentActivity() {
                                         fontWeight = FontWeight.SemiBold
                                     )
                                     Text(
-                                        if (currentScreen == "catalog") "Browse & install" else "HK8 PRO MAX companion",
+                                        if (currentScreen == "catalog") "Browse Telegram & remember" else "HK8 PRO MAX companion",
                                         style = MaterialTheme.typography.labelMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -180,11 +183,6 @@ class MainActivity : ComponentActivity() {
                                 val bytes = catalogViewModel.loadFaceBytes(face) ?: return@CatalogScreen
                                 viewModel.selectClock2FromCatalog(face.fileName, bytes)
                                 viewModel.setScreen("installer")
-                            },
-                            onOpenChannelFace = { face ->
-                            },
-                            onDeleteSavedFace = { face ->
-                                catalogViewModel.deleteFace(face.id)
                             },
                             modifier = Modifier.padding(padding)
                         )
@@ -626,7 +624,7 @@ private fun WatchfaceCard(
                 ) {
                     Icon(Icons.Rounded.Collections, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text("Save to Catalog")
+                    Text("Keep for later")
                 }
             }
         }

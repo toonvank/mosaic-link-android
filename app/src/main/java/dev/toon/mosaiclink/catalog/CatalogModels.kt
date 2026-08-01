@@ -13,6 +13,7 @@ data class SavedFace(
     val previewPath: String,
     val dataPath: String,
     val sourceSha256: String,
+    val installCount: Int = 1,
 ) {
     fun loadPreview(context: Context): Bitmap? {
         val f = File(context.filesDir, "saved_faces/$previewPath")

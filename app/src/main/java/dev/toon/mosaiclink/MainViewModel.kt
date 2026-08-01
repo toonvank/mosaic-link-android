@@ -195,6 +195,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 mutableState.update { it.copy(uploadProgress = null) }
+                runCatching { withContext(Dispatchers.IO) { rememberCurrentFace() } }
+                    .onFailure { log("Installed, but history could not be updated") }
                 log("Transfer accepted — press Home once to open the new face")
             }
             installJob = null
@@ -245,27 +247,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 
                 updatePhase("Parsing watchface…")
-                val document = withContext(Dispatchers.Default) {
-                    Clock2Parser.parse(bytes, fileName)
-                }
-                
-                val compatibility = Clock2Parser.compatibility(document)
-                if (!compatibility.supported) {
-                    error("Watchface is incompatible: ${compatibility.reasons.firstOrNull()}")
-                }
-                
-                updatePhase("Rendering watchface preview…")
-                val built = withContext(Dispatchers.Default) {
-                    builder.build(document, ZonedDateTime.now(), 73)
-                }
-                
-                updatePhase("Saving to catalog…")
-                val preview = android.graphics.BitmapFactory.decodeByteArray(built.previewPng, 0, built.previewPng.size)
-                
-                catalogRepo.save(document.name, fileName, bytes, preview, built.sourceSha256)
-                
-                log("Imported \"${document.name}\" to catalog")
-                mutableState.update { it.copy(currentScreen = "catalog") }
+                processClock2(fileName, bytes, persist = true)
+                log("Imported \"$fileName\" from Telegram")
+                mutableState.update { it.copy(currentScreen = "installer") }
             }
         }
     }
@@ -273,13 +257,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val catalogRepo = SavedFacesRepository(getApplication<Application>())
 
     fun saveToCatalog() {
-        val face = mutableState.value.builtFace ?: return
-        val doc = mutableState.value.document ?: return
-        val name = mutableState.value.selectedFileName ?: "watchface"
-        val bytes = File(getApplication<Application>().filesDir, LAST_CLOCK2).readBytes()
-        val preview = android.graphics.BitmapFactory.decodeByteArray(face.previewPng, 0, face.previewPng.size)
-        catalogRepo.save(name, name, bytes, preview, face.sourceSha256)
-        log("Saved \"$name\" to catalog")
+        viewModelScope.launch {
+            val saved = withContext(Dispatchers.IO) { rememberCurrentFace() } ?: return@launch
+            log("Kept \"${saved.name}\" in installed faces")
+        }
     }
 
     fun selectClock2FromCatalog(fileName: String, bytes: ByteArray) {
@@ -288,6 +269,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 processClock2(fileName, bytes, persist = true)
             }
         }
+    }
+
+    private fun rememberCurrentFace(): dev.toon.mosaiclink.catalog.SavedFace? {
+        val face = mutableState.value.builtFace ?: return null
+        val name = mutableState.value.selectedFileName ?: face.displayName
+        val source = File(getApplication<Application>().filesDir, LAST_CLOCK2)
+        if (!source.isFile) return null
+        val preview = android.graphics.BitmapFactory.decodeByteArray(
+            face.previewPng,
+            0,
+            face.previewPng.size,
+        ) ?: return null
+        return catalogRepo.save(
+            name = face.displayName,
+            fileName = name,
+            clock2Bytes = source.readBytes(),
+            preview = preview,
+            sourceSha256 = face.sourceSha256,
+        )
     }
 
     private suspend fun ensureConnected() {

@@ -4,13 +4,14 @@ import android.app.Application
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -20,7 +21,6 @@ data class CatalogUiState(
     val loading: Boolean = false,
     val loadingMore: Boolean = false,
     val error: String? = null,
-    val searchQuery: String = "",
     val hasMore: Boolean = false,
     val scraped: Boolean = false,
 )
@@ -31,7 +31,7 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
         private const val TAG = "CatalogVM"
         private const val PREFS = "mosaic_link_catalog"
         private const val KEY_CACHED_FACES = "cached_channel_faces"
-        private const val KEY_LAST_BEFORE = "cached_last_before_id"
+        private const val KEY_LAST_BEFORE_BY_CHANNEL = "cached_before_by_channel"
     }
 
     private val repo = SavedFacesRepository(application)
@@ -53,6 +53,16 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
         refreshSaved()
     }
 
+    fun deleteFaces(ids: Set<String>) {
+        repo.delete(ids)
+        refreshSaved()
+    }
+
+    fun clearSavedFaces() {
+        repo.clear()
+        refreshSaved()
+    }
+
     fun saveCurrentFace(
         name: String,
         fileName: String,
@@ -66,51 +76,51 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
 
     fun loadFaceBytes(face: SavedFace): ByteArray? = repo.loadClock2Bytes(face)
 
-    fun setSearchQuery(query: String) {
-        mutableState.update { it.copy(searchQuery = query) }
-    }
-
     fun scrapeChannels() {
         viewModelScope.launch {
             mutableState.update { it.copy(loading = true, error = null) }
             try {
-                val allFaces = mutableListOf<ScrapedFace>()
-                var lowestId = Int.MAX_VALUE
-
-                for (channel in ChannelScraper.CHANNELS) {
-                    val latestResult = withContext(Dispatchers.IO) {
-                        scraper.scrapeChannel(channel)
-                    }
-                    allFaces.addAll(latestResult.faces)
-                    if (latestResult.lowestMessageId < lowestId && latestResult.lowestMessageId > 0) {
-                        lowestId = latestResult.lowestMessageId
-                    }
-
-                    if (latestResult.lowestMessageId > 30) {
-                        val randomResult = withContext(Dispatchers.IO) {
-                            scraper.scrapeRandomPage(channel, latestResult.lowestMessageId)
+                val results = ChannelScraper.CHANNELS.map { channel ->
+                    async(Dispatchers.IO) {
+                        runCatching {
+                            val latest = scraper.scrapeChannel(channel)
+                            val archive = if (latest.lowestMessageId > 30) {
+                                scraper.scrapeRandomPage(channel, latest.lowestMessageId)
+                            } else {
+                                ScrapeResult(emptyList(), 0, false)
+                            }
+                            val faces = (latest.faces + archive.faces)
+                                .distinctBy { it.messageUrl }
+                            ChannelBatch(
+                                channel = channel,
+                                faces = faces,
+                                cursor = latest.lowestMessageId.takeIf { it > 0 },
+                                hasMore = latest.hasMore,
+                            )
+                        }.getOrElse { failure ->
+                            Log.w(TAG, "Could not scrape ${channel.username}", failure)
+                            ChannelBatch(channel, emptyList(), null, false, failure.message)
                         }
-                        allFaces.addAll(randomResult.faces)
-                        if (randomResult.lowestMessageId < lowestId && randomResult.lowestMessageId > 0) {
-                            lowestId = randomResult.lowestMessageId
-                        }
                     }
-                }
+                }.awaitAll()
+                if (results.all { it.error != null }) error("Could not reach Telegram's public catalog")
 
-                val deduped = allFaces
-                    .distinctBy { it.fileName }
-                    .sortedByDescending { it.messageId }
+                val deduped = interleave(results.map { it.faces })
+                    .distinctBy { it.messageUrl }
+                val cursors = results.mapNotNull { batch ->
+                    batch.cursor?.let { batch.channel.username to it }
+                }.toMap()
 
                 mutableState.update {
                     it.copy(
                         channelFaces = deduped,
                         loading = false,
-                        hasMore = deduped.isNotEmpty(),
+                        hasMore = results.any { batch -> batch.hasMore },
                         scraped = true,
                     )
                 }
 
-                cacheChannelFaces(deduped, lowestId)
+                cacheChannelFaces(deduped, cursors)
                 Log.d(TAG, "Scraped ${deduped.size} faces from ${ChannelScraper.CHANNELS.size} channels")
             } catch (e: Exception) {
                 Log.e(TAG, "Scrape failed", e)
@@ -129,47 +139,49 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
             mutableState.update { it.copy(loadingMore = true, error = null) }
             try {
                 val existing = currentState.channelFaces
-                val existingIds = existing.map { it.messageId }.toSet()
-                val newFaces = mutableListOf<ScrapedFace>()
-                var lowestId = Int.MAX_VALUE
-
-                for (channel in ChannelScraper.CHANNELS) {
-                    val cachedBefore = getChannelLastBefore(channel.username)
-                        ?: existing.filter { it.channelName == channel.displayName }
-                            .minOfOrNull { it.messageId }
-
-                    val result = withContext(Dispatchers.IO) {
-                        scraper.scrapeChannel(channel, cachedBefore)
+                val existingUrls = existing.map { it.messageUrl }.toSet()
+                val batches = ChannelScraper.CHANNELS.map { channel ->
+                    async(Dispatchers.IO) {
+                        runCatching {
+                            val cachedBefore = getChannelLastBefore(channel.username)
+                                ?: existing.filter { it.channelName == channel.displayName }
+                                    .minOfOrNull { it.messageId }
+                            val result = scraper.scrapeChannel(channel, cachedBefore)
+                            ChannelBatch(
+                                channel = channel,
+                                faces = result.faces.filter { it.messageUrl !in existingUrls },
+                                cursor = result.lowestMessageId.takeIf { it > 0 },
+                                hasMore = result.hasMore,
+                            )
+                        }.getOrElse { failure ->
+                            Log.w(TAG, "Could not load more from ${channel.username}", failure)
+                            ChannelBatch(channel, emptyList(), null, false, failure.message)
+                        }
                     }
-
-                    val fresh = result.faces.filter { it.messageId !in existingIds }
-                    newFaces.addAll(fresh)
-
-                    if (result.lowestMessageId < lowestId && result.lowestMessageId > 0) {
-                        lowestId = result.lowestMessageId
-                    }
-                }
+                }.awaitAll()
+                if (batches.all { it.error != null }) error("Could not reach Telegram's public catalog")
+                val newFaces = interleave(batches.map { it.faces })
 
                 if (newFaces.isEmpty()) {
                     mutableState.update { it.copy(loadingMore = false, hasMore = false) }
                     return@launch
                 }
 
-                val combined = (existing + newFaces)
-                    .distinctBy { it.fileName }
-                    .sortedByDescending { it.messageId }
+                val combined = (existing + newFaces).distinctBy { it.messageUrl }
 
                 mutableState.update {
                     it.copy(
                         channelFaces = combined,
                         loadingMore = false,
-                        hasMore = newFaces.size >= 5,
+                        hasMore = batches.any { it.hasMore },
                     )
                 }
 
-                if (lowestId != Int.MAX_VALUE) {
-                    cacheChannelFaces(combined, lowestId)
+                val updatedCursors = getChannelCursors().toMutableMap()
+                batches.forEach { batch ->
+                    batch.cursor?.let { updatedCursors[batch.channel.username] = it }
                 }
+                cacheChannelFaces(combined, updatedCursors)
                 Log.d(TAG, "Loaded ${newFaces.size} more faces (total: ${combined.size})")
             } catch (e: Exception) {
                 Log.e(TAG, "Load more failed", e)
@@ -200,7 +212,7 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
             }
             mutableState.update {
                 it.copy(
-                    channelFaces = faces.sortedByDescending { f -> f.messageId },
+                    channelFaces = faces,
                     hasMore = faces.isNotEmpty(),
                 )
             }
@@ -210,7 +222,7 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    private fun cacheChannelFaces(faces: List<ScrapedFace>, lowestId: Int) {
+    private fun cacheChannelFaces(faces: List<ScrapedFace>, cursors: Map<String, Int>) {
         val arr = JSONArray()
         for (face in faces) {
             arr.put(JSONObject().apply {
@@ -226,13 +238,37 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
         getApplication<Application>().getSharedPreferences(PREFS, 0)
             .edit()
             .putString(KEY_CACHED_FACES, arr.toString())
-            .putInt(KEY_LAST_BEFORE, lowestId)
+            .putString(KEY_LAST_BEFORE_BY_CHANNEL, JSONObject(cursors).toString())
             .apply()
     }
 
     private fun getChannelLastBefore(channelUsername: String): Int? {
-        val prefs = getApplication<Application>().getSharedPreferences(PREFS, 0)
-        val v = prefs.getInt(KEY_LAST_BEFORE, -1)
-        return if (v > 0) v else null
+        return getChannelCursors()[channelUsername]
     }
+
+    private fun getChannelCursors(): Map<String, Int> {
+        val prefs = getApplication<Application>().getSharedPreferences(PREFS, 0)
+        val raw = prefs.getString(KEY_LAST_BEFORE_BY_CHANNEL, null) ?: return emptyMap()
+        return runCatching {
+            val objectValue = JSONObject(raw)
+            buildMap {
+                objectValue.keys().forEach { key -> put(key, objectValue.getInt(key)) }
+            }
+        }.getOrDefault(emptyMap())
+    }
+
+    private fun interleave(groups: List<List<ScrapedFace>>): List<ScrapedFace> = buildList {
+        val largest = groups.maxOfOrNull { it.size } ?: 0
+        for (index in 0 until largest) {
+            groups.forEach { group -> group.getOrNull(index)?.let(::add) }
+        }
+    }
+
+    private data class ChannelBatch(
+        val channel: ChannelConfig,
+        val faces: List<ScrapedFace>,
+        val cursor: Int?,
+        val hasMore: Boolean,
+        val error: String? = null,
+    )
 }

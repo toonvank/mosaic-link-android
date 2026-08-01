@@ -37,6 +37,7 @@ class ChannelScraper {
         val CHANNELS = listOf(
             ChannelConfig("ClockologyOfficial", "Clockology Official"),
             ChannelConfig("Clockologychannel", "Clockology Fans"),
+            ChannelConfig("ClockologyWatchFaces", "Clockology Watch Faces"),
             ChannelConfig("bAdstylee", "bAdGB Faces"),
         )
     }
@@ -52,7 +53,7 @@ class ChannelScraper {
     private val docLinkPattern =
         Pattern.compile("tgme_widget_message_document_wrap\"[^>]*href=\"([^\"]+)\"")
     private val photoUrlPattern =
-        Pattern.compile("background-image:url\\('([^']+)'\\)")
+        Pattern.compile("background-image:url\\('(https?://[^']+)'\\)")
     private val textPattern =
         Pattern.compile("tgme_widget_message_text[^>]*>(.*?)</div>", Pattern.DOTALL)
     private val tagStripPattern =
