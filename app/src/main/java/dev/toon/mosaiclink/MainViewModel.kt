@@ -58,6 +58,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val mutableState = MutableStateFlow(MosaicUiState())
     val state: StateFlow<MosaicUiState> = mutableState.asStateFlow()
     private var installJob: Job? = null
+    private var autoConnectStarted = false
 
     init {
         val cached = File(application.filesDir, LAST_CLOCK2)
@@ -187,6 +188,39 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 mutableState.update { it.copy(nearbyDevices = devices, autoConnecting = false) }
                 check(devices.isNotEmpty()) { "No Bluetooth devices found nearby" }
                 log("Found ${devices.size} nearby devices — choose your watch")
+            }
+        }
+    }
+
+    fun autoConnect() {
+        if (autoConnectStarted) return
+        autoConnectStarted = true
+        viewModelScope.launch {
+            runBusy("Looking for your watch…") {
+                val preferences = getApplication<Application>().getSharedPreferences(PREFS, 0)
+                val preferredAddress = preferences.getString(LAST_DEVICE_ADDRESS, null)
+                mutableState.update {
+                    it.copy(connection = BleConnectionState.Scanning, nearbyDevices = emptyList())
+                }
+                val discovery = ble.discoverWatch(preferredAddress)
+                val target = discovery.target
+                if (target == null) {
+                    mutableState.update {
+                        it.copy(
+                            connection = BleConnectionState.Disconnected,
+                            nearbyDevices = discovery.nearbyDevices,
+                        )
+                    }
+                    log(
+                        if (discovery.nearbyDevices.isEmpty()) {
+                            "No HK8 found nearby"
+                        } else {
+                            "No HK8 found — choose from ${discovery.nearbyDevices.size} nearby devices"
+                        },
+                    )
+                } else {
+                    connectToWatch(target)
+                }
             }
         }
     }

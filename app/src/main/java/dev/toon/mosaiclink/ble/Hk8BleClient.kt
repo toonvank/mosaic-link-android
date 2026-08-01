@@ -31,6 +31,32 @@ import kotlin.math.ceil
 
 data class Hk8Device(val name: String, val address: String, val rssi: Int?)
 
+data class WatchDiscovery(
+    val target: Hk8Device?,
+    val nearbyDevices: List<Hk8Device>,
+)
+
+internal fun selectAutoConnectTarget(
+    devices: Collection<Hk8Device>,
+    preferredAddress: String?,
+    allowHk8Fallback: Boolean,
+): Hk8Device? {
+    preferredAddress?.let { address ->
+        devices.firstOrNull { it.address.equals(address, ignoreCase = true) }
+            ?.let { return it }
+    }
+    return if (preferredAddress == null || allowHk8Fallback) {
+        devices.firstOrNull { it.name.contains("HK8", ignoreCase = true) }
+    } else {
+        null
+    }
+}
+
+private fun Collection<Hk8Device>.sortedForPicker(): List<Hk8Device> = sortedWith(
+    compareByDescending<Hk8Device> { it.name.contains("HK8", ignoreCase = true) }
+        .thenByDescending { it.rssi ?: Int.MIN_VALUE },
+)
+
 sealed interface BleConnectionState {
     data object Disconnected : BleConnectionState
     data object Scanning : BleConnectionState
@@ -71,6 +97,59 @@ class Hk8BleClient(private val context: Context) {
     private var connectionReady: CompletableDeferred<Unit>? = null
     private var pendingWrite: CompletableDeferred<Unit>? = null
     private var pendingDescriptor: CompletableDeferred<Unit>? = null
+
+    /**
+     * Scans once for startup auto-connect while retaining every result for the
+     * device picker. A remembered device wins; otherwise an HK8 is selected.
+     */
+    suspend fun discoverWatch(
+        preferredAddress: String? = null,
+        timeoutMillis: Long = 8_000,
+    ): WatchDiscovery {
+        check(adapter.isEnabled) { "Bluetooth is turned off" }
+        val devices = linkedMapOf<String, Hk8Device>()
+        val target = CompletableDeferred<Hk8Device>()
+        val callback = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, scanResult: ScanResult) {
+                val name = scanResult.device.name ?: scanResult.scanRecord?.deviceName
+                devices[scanResult.device.address] = Hk8Device(
+                    name = name?.takeIf(String::isNotBlank) ?: "Unnamed BLE device",
+                    address = scanResult.device.address,
+                    rssi = scanResult.rssi,
+                )
+                if (!target.isCompleted) {
+                    selectAutoConnectTarget(
+                        devices = devices.values,
+                        preferredAddress = preferredAddress,
+                        allowHk8Fallback = false,
+                    )?.let(target::complete)
+                }
+            }
+
+            override fun onScanFailed(errorCode: Int) {
+                if (!target.isCompleted) {
+                    target.completeExceptionally(
+                        IllegalStateException("Bluetooth scan failed ($errorCode)"),
+                    )
+                }
+            }
+        }
+        adapter.bluetoothLeScanner.startScan(callback)
+        val immediateTarget = try {
+            withTimeoutOrNull(timeoutMillis) { target.await() }
+        } finally {
+            adapter.bluetoothLeScanner.stopScan(callback)
+        }
+        val nearby = devices.values.sortedForPicker()
+        return WatchDiscovery(
+            target = immediateTarget ?: selectAutoConnectTarget(
+                devices = nearby,
+                preferredAddress = preferredAddress,
+                allowHk8Fallback = true,
+            ),
+            nearbyDevices = nearby,
+        )
+    }
 
     suspend fun findWatch(
         preferredAddress: String? = null,
@@ -156,10 +235,7 @@ class Hk8BleClient(private val context: Context) {
         } finally {
             adapter.bluetoothLeScanner.stopScan(callback)
         }
-        return devices.values.sortedWith(
-            compareByDescending<Hk8Device> { it.name.contains("HK8", ignoreCase = true) }
-                .thenByDescending { it.rssi ?: Int.MIN_VALUE },
-        )
+        return devices.values.sortedForPicker()
     }
 
     suspend fun connect(device: Hk8Device): BleConnectionState.Connected {

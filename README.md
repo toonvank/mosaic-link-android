@@ -7,8 +7,10 @@ It has two deliberately narrow jobs:
 2. convert a compatible Clock2 file with the verified `wf_clock23` asset-only
    adapter and transfer it over the SiFli BLE protocol.
 
-The last successfully connected watch is remembered and preferred on later
-connection attempts. Opening the app does not connect automatically.
+On startup, Mosaic Link connects automatically to the last successfully
+connected watch. On a first launch, or when that watch is unavailable, it
+connects to a nearby device advertising an HK8 name. If neither is found within
+the startup scan, the nearby-device picker is shown instead.
 
 The app is a separate project from `clock2_hk8`. It does not modify the
 Obsidian research vault.
