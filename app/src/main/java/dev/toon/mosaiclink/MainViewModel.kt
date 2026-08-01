@@ -82,25 +82,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun autoConnect() {
-        viewModelScope.launch {
-            mutableState.update { it.copy(autoConnecting = true) }
-            try {
-                connectToWatch()
-            } catch (e: Exception) {
-                log("Auto-connect failed — tap to scan for devices")
-            } finally {
-                mutableState.update { it.copy(autoConnecting = false) }
-            }
-        }
-        viewModelScope.launch {
-            try {
-                val devices = ble.scanNearby()
-                mutableState.update { it.copy(nearbyDevices = devices) }
-            } catch (_: Exception) {}
-        }
-    }
-
     fun selectClock2(uri: Uri) {
         viewModelScope.launch {
             runBusy("Reading Clock2 file…") {
@@ -198,31 +179,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (autoConnectStarted) return
         autoConnectStarted = true
         viewModelScope.launch {
-            runBusy("Looking for your watch…") {
-                val preferences = getApplication<Application>().getSharedPreferences(PREFS, 0)
-                val preferredAddress = preferences.getString(LAST_DEVICE_ADDRESS, null)
-                mutableState.update {
-                    it.copy(connection = BleConnectionState.Scanning, nearbyDevices = emptyList())
-                }
-                val discovery = ble.discoverWatch(preferredAddress)
-                val target = discovery.target
-                if (target == null) {
+            mutableState.update { it.copy(autoConnecting = true) }
+            try {
+                runBusy("Looking for your watch…") {
+                    val preferences = getApplication<Application>().getSharedPreferences(PREFS, 0)
+                    val preferredAddress = preferences.getString(LAST_DEVICE_ADDRESS, null)
                     mutableState.update {
-                        it.copy(
-                            connection = BleConnectionState.Disconnected,
-                            nearbyDevices = discovery.nearbyDevices,
-                        )
+                        it.copy(connection = BleConnectionState.Scanning, nearbyDevices = emptyList())
                     }
-                    log(
-                        if (discovery.nearbyDevices.isEmpty()) {
-                            "No HK8 found nearby"
-                        } else {
-                            "No HK8 found — choose from ${discovery.nearbyDevices.size} nearby devices"
-                        },
-                    )
-                } else {
-                    connectToWatch(target)
+                    val discovery = ble.discoverWatch(preferredAddress)
+                    val target = discovery.target
+                    if (target == null) {
+                        mutableState.update {
+                            it.copy(
+                                connection = BleConnectionState.Disconnected,
+                                nearbyDevices = discovery.nearbyDevices,
+                            )
+                        }
+                        log(
+                            if (discovery.nearbyDevices.isEmpty()) {
+                                "No HK8 found nearby"
+                            } else {
+                                "No HK8 found — choose from ${discovery.nearbyDevices.size} nearby devices"
+                            },
+                        )
+                    } else {
+                        connectToWatch(target)
+                    }
                 }
+            } finally {
+                mutableState.update { it.copy(autoConnecting = false) }
             }
         }
     }
