@@ -16,6 +16,7 @@ import dev.toon.mosaiclink.clock2.Clock2Parser
 import dev.toon.mosaiclink.clock2.Compatibility
 import dev.toon.mosaiclink.clock2.ScaleMode
 import dev.toon.mosaiclink.clock2.WatchfaceBuilder
+import dev.toon.mosaiclink.catalog.SavedFacesRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
@@ -42,6 +43,7 @@ data class MosaicUiState(
     val nearbyDevices: List<Hk8Device> = emptyList(),
     val autoConnecting: Boolean = false,
     val activity: List<String> = listOf("Ready — no watch contacted"),
+    val currentScreen: String = "installer",
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
@@ -280,6 +282,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 mutableState.update { it.copy(uploadProgress = null) }
+                runCatching { withContext(Dispatchers.IO) { rememberCurrentFace() } }
+                    .onFailure { log("Installed, but history could not be updated") }
                 log("Transfer accepted — press Home once to open the new face")
             }
             installJob = null
@@ -306,6 +310,72 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearError() {
         mutableState.update { it.copy(error = null) }
+    }
+
+    fun setScreen(screen: String) {
+        mutableState.update { it.copy(currentScreen = screen) }
+    }
+
+    fun importSharedClock2(uri: Uri) {
+        viewModelScope.launch {
+            runBusy("Importing shared Clock2 file…") {
+                val resolver = getApplication<Application>().contentResolver
+                val fileName = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+                    ?.use { cursor ->
+                        if (cursor.moveToFirst()) cursor.getString(0) else null
+                    } ?: "shared_watchface.clock2"
+                
+                if (!fileName.endsWith(".clock2", ignoreCase = true)) {
+                    error("Shared file is not a valid .clock2 file: $fileName")
+                }
+                
+                val bytes = withContext(Dispatchers.IO) {
+                    resolver.openInputStream(uri)?.use { it.readBytes() }
+                        ?: error("Could not read shared file")
+                }
+                
+                updatePhase("Parsing watchface…")
+                processClock2(fileName, bytes, persist = true)
+                log("Imported \"$fileName\" from Telegram")
+                mutableState.update { it.copy(currentScreen = "installer") }
+            }
+        }
+    }
+
+    private val catalogRepo = SavedFacesRepository(getApplication<Application>())
+
+    fun saveToCatalog() {
+        viewModelScope.launch {
+            val saved = withContext(Dispatchers.IO) { rememberCurrentFace() } ?: return@launch
+            log("Kept \"${saved.name}\" in installed faces")
+        }
+    }
+
+    fun selectClock2FromCatalog(fileName: String, bytes: ByteArray) {
+        viewModelScope.launch {
+            runBusy("Loading from catalog…") {
+                processClock2(fileName, bytes, persist = true)
+            }
+        }
+    }
+
+    private fun rememberCurrentFace(): dev.toon.mosaiclink.catalog.SavedFace? {
+        val face = mutableState.value.builtFace ?: return null
+        val name = mutableState.value.selectedFileName ?: face.displayName
+        val source = File(getApplication<Application>().filesDir, LAST_CLOCK2)
+        if (!source.isFile) return null
+        val preview = android.graphics.BitmapFactory.decodeByteArray(
+            face.previewPng,
+            0,
+            face.previewPng.size,
+        ) ?: return null
+        return catalogRepo.save(
+            name = face.displayName,
+            fileName = name,
+            clock2Bytes = source.readBytes(),
+            preview = preview,
+            sourceSha256 = face.sourceSha256,
+        )
     }
 
     private suspend fun ensureConnected() {

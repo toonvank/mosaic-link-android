@@ -16,8 +16,8 @@ android {
         applicationId = "dev.toon.mosaiclink"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10
-        versionName = "0.2.0-experimental.8"
+        versionCode = 11
+        versionName = "0.3.0-experimental.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
@@ -75,6 +75,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.3")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("com.googlecode.plist:dd-plist:1.28")
+    implementation("androidx.documentfile:documentfile:1.1.0")
+    implementation("io.coil-kt:coil-compose:2.7.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
