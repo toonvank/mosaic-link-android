@@ -54,5 +54,15 @@ class SiFliProtocolTest {
         )
     }
 
+    @Test
+    fun cancelCustomDialMatchesWearfitStartSendPicFileSize2() {
+        assertArrayEquals(
+            byteArrayOf(
+                0xAD.toByte(), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+            ),
+            SiFliProtocol.cancelCustomDial(),
+        )
+    }
+
     private fun ByteArray.hex(): String = joinToString("") { "%02x".format(it) }
 }
