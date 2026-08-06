@@ -40,6 +40,7 @@ import androidx.compose.material.icons.rounded.CloudUpload
 import androidx.compose.material.icons.rounded.Collections
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.UploadFile
+import androidx.compose.material.icons.rounded.Wallpaper
 import androidx.compose.material.icons.rounded.Watch
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -51,6 +52,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -197,6 +199,7 @@ class MainActivity : ComponentActivity() {
                             onRequestPermissions = { permissionLauncher.launch(permissions) },
                             onFile = viewModel::selectClock2,
                             onScaleMode = viewModel::setScaleMode,
+                            onBackgroundIndex = viewModel::setBackgroundIndex,
                             onConnect = { viewModel.connect() },
                             onConnectDevice = { device -> viewModel.connect(device) },
                             onDisconnect = viewModel::disconnect,
@@ -260,6 +263,7 @@ private fun MosaicLinkContent(
     onRequestPermissions: () -> Unit,
     onFile: (android.net.Uri) -> Unit,
     onScaleMode: (dev.toon.mosaiclink.clock2.ScaleMode) -> Unit,
+    onBackgroundIndex: (Int) -> Unit,
     onConnect: () -> Unit,
     onConnectDevice: (Hk8Device) -> Unit,
     onDisconnect: () -> Unit,
@@ -330,6 +334,7 @@ private fun MosaicLinkContent(
             onChoose = { filePicker.launch(arrayOf("*/*")) },
             onInstall = { installDialog = true },
             onScaleMode = onScaleMode,
+            onBackgroundIndex = onBackgroundIndex,
             onSaveToCatalog = onSaveToCatalog,
         )
         AnimatedVisibility(state.busy) {
@@ -496,6 +501,7 @@ private fun WatchfaceCard(
     onChoose: () -> Unit,
     onInstall: () -> Unit,
     onScaleMode: (dev.toon.mosaiclink.clock2.ScaleMode) -> Unit,
+    onBackgroundIndex: (Int) -> Unit,
     onSaveToCatalog: () -> Unit,
 ) {
     Card(shape = RoundedCornerShape(28.dp)) {
@@ -600,6 +606,33 @@ private fun WatchfaceCard(
                                 style = MaterialTheme.typography.bodySmall,
                             )
                         }
+                    }
+                }
+            }
+
+            // Background picker — shown when multiple background candidates exist
+            val candidates = state.document?.backgroundCandidates
+            if (candidates != null && candidates.size > 1) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        Icons.Rounded.Wallpaper,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    candidates.forEachIndexed { i, layer ->
+                        FilterChip(
+                            selected = state.backgroundIndex == i,
+                            onClick = { onBackgroundIndex(i) },
+                            label = {
+                                Text(
+                                    if (i == 0) "Main" else if (i == 1) "AOD" else "BG ${i + 1}",
+                                )
+                            },
+                        )
                     }
                 }
             }

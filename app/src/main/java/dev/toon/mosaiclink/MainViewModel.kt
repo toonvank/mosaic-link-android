@@ -36,6 +36,7 @@ data class MosaicUiState(
     val compatibility: Compatibility? = null,
     val builtFace: BuiltWatchface? = null,
     val scaleMode: ScaleMode = ScaleMode.CONTAIN,
+    val backgroundIndex: Int = 0,
     val phase: String? = null,
     val uploadProgress: UploadProgress? = null,
     val busy: Boolean = false,
@@ -115,11 +116,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun setBackgroundIndex(index: Int) {
+        mutableState.update { it.copy(backgroundIndex = index) }
+        val document = mutableState.value.document ?: return
+        val mode = mutableState.value.scaleMode
+        viewModelScope.launch {
+            runBusy("Switching background…") {
+                processClock2(
+                    mutableState.value.selectedFileName ?: "watchface.clock2",
+                    document.sourceSha256.toByteArray(),
+                    persist = false,
+                    mode,
+                    backgroundIndex = index,
+                    cachedDocument = document,
+                )
+            }
+        }
+    }
+
     private suspend fun processClock2(
         fileName: String,
         bytes: ByteArray,
         persist: Boolean,
         scaleMode: ScaleMode = ScaleMode.CONTAIN,
+        backgroundIndex: Int = 0,
         cachedDocument: Clock2Document? = null,
     ) {
         updatePhase("Checking layer topology…")
@@ -142,7 +162,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         updatePhase("Rendering and validating assets…")
         val built = withContext(Dispatchers.Default) {
-            builder.build(document, ZonedDateTime.now(), 73, scaleMode)
+            builder.build(document, ZonedDateTime.now(), 73, scaleMode, backgroundIndex)
         }
         if (persist) {
             withContext(Dispatchers.IO) {

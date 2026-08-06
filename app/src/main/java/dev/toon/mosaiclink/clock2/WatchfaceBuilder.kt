@@ -85,6 +85,7 @@ class WatchfaceBuilder(private val context: Context) {
         instant: ZonedDateTime = ZonedDateTime.now(),
         battery: Int = 73,
         scaleMode: ScaleMode = ScaleMode.CONTAIN,
+        backgroundIndex: Int = 0,
     ): BuiltWatchface {
         val compatibility = Clock2Parser.compatibility(document)
         require(compatibility.supported) {
@@ -102,7 +103,7 @@ class WatchfaceBuilder(private val context: Context) {
             files.getValue(MODULE_PATH),
         )
 
-        val static = renderStatic(document, instant, battery, resolvedMode)
+        val static = renderStatic(document, instant, battery, resolvedMode, backgroundIndex)
         val mainLayers = document.activeLayers
             .filter(::isMainHand)
             .associateBy { it.kind }
@@ -170,6 +171,7 @@ class WatchfaceBuilder(private val context: Context) {
             fileCount = files.size,
             warnings = compatibility.warnings,
             scaleMode = resolvedMode,
+            backgroundIndex = backgroundIndex,
         )
     }
 
@@ -178,6 +180,7 @@ class WatchfaceBuilder(private val context: Context) {
         instant: ZonedDateTime,
         battery: Int,
         scaleMode: ScaleMode,
+        backgroundIndex: Int = 0,
     ): Bitmap {
         val output = Bitmap.createBitmap(
             VIEWPORT_WIDTH, VIEWPORT_HEIGHT, Bitmap.Config.ARGB_8888,
@@ -193,17 +196,32 @@ class WatchfaceBuilder(private val context: Context) {
         val originY = (VIEWPORT_HEIGHT - scaledCanvasH) / 2f
         val centerX = originX + scaledCanvasW / 2f
         val centerY = originY + scaledCanvasH / 2f
+
+        // Determine which background candidate layers to skip.
+        // When multiple background candidates exist (e.g. main + AOD), only
+        // render the one selected by the user. Non-candidate images are
+        // always rendered as overlays.
+        val candidates = document.backgroundCandidates
+        val skipBackgroundIndices: Set<Int> = if (candidates.size > 1) {
+            candidates.mapIndexedNotNull { i, layer ->
+                if (i != backgroundIndex.coerceIn(0, candidates.size - 1)) layer.index else null
+            }.toSet()
+        } else {
+            emptySet()
+        }
+
         // Capture all asset keys before BitmapFactory sees any buffers. Clock2
         // uses the filename as its deduplication/reference identity.
         val cacheKeys = document.activeLayers
             .filter(::isRasterLayer)
             .filterNot(::isMainHand)
+            .filterNot { it.index in skipBackgroundIndices }
             .associate {
                 it.index to layerCacheKey(document, it, instant, scaleMode)
             }
         val decodedImages = mutableMapOf<String, Bitmap>()
         try {
-            document.activeLayers.filterNot(::isMainHand).forEach { layer ->
+            document.activeLayers.filterNot(::isMainHand).filterNot { it.index in skipBackgroundIndices }.forEach { layer ->
                 val x = centerX + layer.x * xScale
                 val y = centerY + layer.y * yScale
                 when (layer.type) {

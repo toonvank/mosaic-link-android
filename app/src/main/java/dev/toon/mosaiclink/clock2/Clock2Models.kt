@@ -40,6 +40,23 @@ data class Clock2Document(
     val sourceSha256: String,
 ) {
     val activeLayers: List<Clock2Layer> get() = layers.filter { it.active }
+
+    /**
+     * Image layers that could serve as the watchface background.
+     * When a Clock2 face has multiple large image layers (e.g. a main
+     * background and an AOD variant), the user can choose which one to use.
+     * A layer is considered a background candidate if it's a large image
+     * (not a hand, not a small overlay) centered at or near (0,0).
+     */
+    val backgroundCandidates: List<Clock2Layer>
+        get() = activeLayers.filter { layer ->
+            layer.type == "image" &&
+                layer.kind != "twelveHours" &&
+                layer.kind != "minute" &&
+                layer.kind != "seconds" &&
+                (layer.x * 1000f).toInt() == 0 &&
+                (layer.y * 1000f).toInt() == 0
+        }
 }
 
 data class Clock2Requirements(
@@ -66,4 +83,5 @@ data class BuiltWatchface(
     val fileCount: Int,
     val warnings: List<String>,
     val scaleMode: ScaleMode = ScaleMode.CONTAIN,
+    val backgroundIndex: Int = 0,
 )
