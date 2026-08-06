@@ -239,10 +239,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun syncTime() {
         viewModelScope.launch {
             runBusy("Synchronizing time…") {
-                ensureConnected()
-                val now = ZonedDateTime.now()
-                ble.syncTime(now)
-                log("Watch time updated to ${now.toLocalTime().withNano(0)}")
+                try {
+                    ensureConnected()
+                    val now = ZonedDateTime.now()
+                    ble.syncTime(now)
+                    log("Watch time updated to ${now.toLocalTime().withNano(0)}")
+                } finally {
+                    disconnectTransport()
+                }
             }
         }
     }
@@ -256,21 +260,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         installJob = viewModelScope.launch {
             runBusy("Preparing safe transfer…") {
-                updatePhase("Installing ${face.displayName}…")
-                log("Transfer started — keep the watch awake")
-                ble.uploadWatchface(face.packageBytes) { progress ->
-                    BleForegroundService.update(
-                        getApplication(),
-                        "Sending ${progress.fileName} (${progress.fileIndex}/${progress.fileCount})",
-                    )
-                    mutableState.update {
-                        it.copy(uploadProgress = progress, phase = "Sending ${progress.fileName}")
+                try {
+                    updatePhase("Installing ${face.displayName}…")
+                    log("Transfer started — keep the watch awake")
+                    ble.uploadWatchface(face.packageBytes) { progress ->
+                        BleForegroundService.update(
+                            getApplication(),
+                            "Sending ${progress.fileName} (${progress.fileIndex}/${progress.fileCount})",
+                        )
+                        mutableState.update {
+                            it.copy(uploadProgress = progress, phase = "Sending ${progress.fileName}")
+                        }
                     }
+                    mutableState.update { it.copy(uploadProgress = null) }
+                    runCatching { withContext(Dispatchers.IO) { rememberCurrentFace() } }
+                        .onFailure { log("Installed, but history could not be updated") }
+                    log("Transfer accepted — press Home once to open the new face")
+                } catch (error: Exception) {
+                    runCatching { ble.cancelCustomDial() }
+                    throw error
+                } finally {
+                    disconnectTransport()
                 }
-                mutableState.update { it.copy(uploadProgress = null) }
-                runCatching { withContext(Dispatchers.IO) { rememberCurrentFace() } }
-                    .onFailure { log("Installed, but history could not be updated") }
-                log("Transfer accepted — press Home once to open the new face")
             }
             installJob = null
         }
@@ -280,18 +291,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (installJob == null) return
         installJob?.cancel()
         installJob = null
-        ble.disconnect()
-        BleForegroundService.stop(getApplication())
-        mutableState.update {
-            it.copy(
-                connection = BleConnectionState.Disconnected,
-                uploadProgress = null,
-                phase = null,
-                busy = false,
-                error = null,
-            )
+        viewModelScope.launch {
+            runCatching { ble.cancelCustomDial() }
+            disconnectTransport()
+            BleForegroundService.stop(getApplication())
+            mutableState.update {
+                it.copy(
+                    uploadProgress = null,
+                    phase = null,
+                    busy = false,
+                    error = null,
+                )
+            }
+            log("Transfer canceled before activation")
         }
-        log("Transfer canceled before activation")
     }
 
     fun clearError() {
@@ -378,6 +391,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val connected = ble.connect(device)
         BleForegroundService.start(getApplication(), "Connected to ${device.name}")
         mutableState.update { it.copy(connection = connected, nearbyDevices = emptyList()) }
+        // Clear any stuck custom-dial loading state from a previous session.
+        // This is the key prevention: if a prior transfer (from this app,
+        // the Linux uploader, or Wearfit) was interrupted, the watch may be
+        // stuck in a high-rate BLE advertising loop that drains the battery.
+        runCatching { ble.cancelCustomDial() }
         preferences.edit()
             .putString(LAST_DEVICE_ADDRESS, device.address)
             .putString(LAST_DEVICE_NAME, device.name)
@@ -412,6 +430,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             log("Stopped: $message")
         } finally {
             mutableState.update { it.copy(busy = false, phase = null) }
+        }
+    }
+
+    private fun disconnectTransport() {
+        ble.disconnect()
+        mutableState.update {
+            it.copy(
+                connection = BleConnectionState.Disconnected,
+                uploadProgress = null,
+            )
         }
     }
 

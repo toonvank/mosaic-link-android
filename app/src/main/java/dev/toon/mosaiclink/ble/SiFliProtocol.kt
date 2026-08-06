@@ -61,6 +61,20 @@ internal object SiFliProtocol {
         ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN).putInt(blocks).array(),
     )
 
+    /**
+     * Wearfit's `startSendPic(fileSize=2)` command — cancels a stuck
+     * custom-dial loading state on the watch. Written to the Nordic UART
+     * write characteristic (6e400002), not the SiFli transport char.
+     *
+     * Without this, a failed or interrupted type-3 custom photo dial
+     * upload leaves the watch in a perpetual "transfer in progress"
+     * state, causing it to BLE-advertise at ~5× the normal rate and
+     * drain its battery in hours instead of weeks.
+     */
+    fun cancelCustomDial(): ByteArray = byteArrayOf(
+        0xAD.toByte(), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+    )
+
     fun timePacket(time: ZonedDateTime): ByteArray = byteArrayOf(
         0xAB.toByte(), 0, 11, 0xFF.toByte(), 0x93.toByte(), 0x80.toByte(), 0,
         ((time.year ushr 8) and 0xff).toByte(),

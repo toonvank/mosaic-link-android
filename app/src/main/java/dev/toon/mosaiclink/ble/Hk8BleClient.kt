@@ -250,7 +250,12 @@ class Hk8BleClient(private val context: Context) {
             callback,
             BluetoothDeviceTransport.LE,
         )
-        withTimeout(30_000) { requireNotNull(connectionReady).await() }
+        try {
+            withTimeout(30_000) { requireNotNull(connectionReady).await() }
+        } catch (error: Exception) {
+            disconnect()
+            throw error
+        }
         return BleConnectionState.Connected(device, negotiatedMtu)
     }
 
@@ -270,66 +275,89 @@ class Hk8BleClient(private val context: Context) {
         write(requireNotNull(watchWriteCharacteristic), SiFliProtocol.timePacket(time))
     }
 
+    /**
+     * Cancels a stuck custom-dial loading state on the watch. Safe to call
+     * even if no custom dial transfer is in progress — the watch ignores
+     * the command if there is nothing to cancel.
+     *
+     * This must be called on any failed or interrupted transfer, and on
+     * app exit if a transfer may have been in progress. Without it, the
+     * watch can remain in a high-rate BLE advertising loop that drains
+     * the battery in hours.
+     */
+    suspend fun cancelCustomDial() {
+        val char = watchWriteCharacteristic ?: return
+        runCatching { write(char, SiFliProtocol.cancelCustomDial()) }
+    }
+
     suspend fun uploadWatchface(
         packageBytes: ByteArray,
         onProgress: (UploadProgress) -> Unit,
     ) = withContext(Dispatchers.IO) {
-        val files = SiFliProtocol.filesFromZip(packageBytes)
-        val total = files.sumOf { it.bytes.size.toLong() }
-        var sent = 0L
-        val start = sendAndWait(SiFliProtocol.entireStart(total.toInt()), 1)
-        check(start.result == 0) { "Watch rejected transfer start (${start.result})" }
-        var sliceSize = SiFliProtocol.DEFAULT_SLICE
-        if (start.maxDataLength > 0) sliceSize = minOf(sliceSize, start.maxDataLength)
-        if (start.version > 0) {
-            check(start.blockLength > 0) { "Watch reported an invalid block size" }
-            val blocks = files.sumOf {
-                ceil(it.bytes.size.toDouble() / start.blockLength).toInt()
+        val activeGatt = requireNotNull(gatt) { "Watch is not connected" }
+        activeGatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+        try {
+            val files = SiFliProtocol.filesFromZip(packageBytes)
+            val total = files.sumOf { it.bytes.size.toLong() }
+            var sent = 0L
+            val start = sendAndWait(SiFliProtocol.entireStart(total.toInt()), 1)
+            check(start.result == 0) { "Watch rejected transfer start (${start.result})" }
+            var sliceSize = SiFliProtocol.DEFAULT_SLICE
+            if (start.maxDataLength > 0) sliceSize = minOf(sliceSize, start.maxDataLength)
+            if (start.version > 0) {
+                check(start.blockLength > 0) { "Watch reported an invalid block size" }
+                val blocks = files.sumOf {
+                    ceil(it.bytes.size.toDouble() / start.blockLength).toInt()
+                }
+                val space = sendAndWait(SiFliProtocol.fileSpace(blocks), 14)
+                check(space.result == 0) { "Watch has insufficient transfer space" }
             }
-            val space = sendAndWait(SiFliProtocol.fileSpace(blocks), 14)
-            check(space.result == 0) { "Watch has insufficient transfer space" }
-        }
 
-        files.forEachIndexed { fileIndex, file ->
-            val opened = sendAndWait(
-                SiFliProtocol.fileStart(file.path, file.bytes.size),
-                3,
-            )
-            check(opened.result == 0) { "Watch rejected ${file.path}" }
-            var offset = 0
-            var index = 1
-            while (offset < file.bytes.size) {
-                val end = minOf(file.bytes.size, offset + sliceSize)
-                val chunk = file.bytes.copyOfRange(offset, end)
-                val response = sendAndWait(SiFliProtocol.fileData(index, chunk), 5)
-                when {
-                    response.result == 0 -> {
-                        offset = end
-                        index++
-                        sent += chunk.size
-                        onProgress(
-                            UploadProgress(
-                                fileIndex + 1,
-                                files.size,
-                                file.path.substringAfterLast('/'),
-                                sent,
-                                total,
-                            ),
+            files.forEachIndexed { fileIndex, file ->
+                val opened = sendAndWait(
+                    SiFliProtocol.fileStart(file.path, file.bytes.size),
+                    3,
+                )
+                check(opened.result == 0) { "Watch rejected ${file.path}" }
+                var offset = 0
+                var index = 1
+                while (offset < file.bytes.size) {
+                    val end = minOf(file.bytes.size, offset + sliceSize)
+                    val chunk = file.bytes.copyOfRange(offset, end)
+                    val response = sendAndWait(SiFliProtocol.fileData(index, chunk), 5)
+                    when {
+                        response.result == 0 -> {
+                            offset = end
+                            index++
+                            sent += chunk.size
+                            onProgress(
+                                UploadProgress(
+                                    fileIndex + 1,
+                                    files.size,
+                                    file.path.substringAfterLast('/'),
+                                    sent,
+                                    total,
+                                ),
+                            )
+                        }
+                        response.result == 4 && response.expectedIndex > 0 -> {
+                            index = response.expectedIndex
+                        }
+                        else -> error(
+                            "Watch rejected ${file.path} slice $index (${response.result})",
                         )
                     }
-                    response.result == 4 && response.expectedIndex > 0 -> {
-                        index = response.expectedIndex
-                    }
-                    else -> error(
-                        "Watch rejected ${file.path} slice $index (${response.result})",
-                    )
                 }
+                val closed = sendAndWait(SiFliProtocol.fileEnd(), 7)
+                check(closed.result == 0) { "Watch could not finalize ${file.path}" }
             }
-            val closed = sendAndWait(SiFliProtocol.fileEnd(), 7)
-            check(closed.result == 0) { "Watch could not finalize ${file.path}" }
+            val finished = sendAndWait(SiFliProtocol.entireEnd(), 9, 60_000)
+            check(finished.result == 0) { "Watch could not activate package (${finished.result})" }
+        } finally {
+            runCatching {
+                activeGatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_BALANCED)
+            }
         }
-        val finished = sendAndWait(SiFliProtocol.entireEnd(), 9, 60_000)
-        check(finished.result == 0) { "Watch could not activate package (${finished.result})" }
     }
 
     private suspend fun sendAndWait(
@@ -427,7 +455,7 @@ class Hk8BleClient(private val context: Context) {
                 )
                 return
             }
-            gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+            gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_BALANCED)
             if (!gatt.requestMtu(SiFliProtocol.MTU_CAP)) {
                 finishHandshake()
             }
