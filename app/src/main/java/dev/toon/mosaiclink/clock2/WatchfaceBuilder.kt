@@ -39,7 +39,7 @@ class WatchfaceBuilder(private val context: Context) {
     )
 
     companion object {
-        const val VIEWPORT_WIDTH = 434
+        const val VIEWPORT_WIDTH = 410
         const val VIEWPORT_HEIGHT = 494
         const val PANEL_WIDTH = VIEWPORT_WIDTH
         const val PANEL_HEIGHT = VIEWPORT_HEIGHT
@@ -98,10 +98,6 @@ class WatchfaceBuilder(private val context: Context) {
         PINNED_HASHES.forEach { (path, hash) ->
             check(files[path]?.sha256() == hash) { "Pinned stock file changed: $path" }
         }
-        files[MODULE_PATH] = WfClock23VisiblePanelPatch.apply(
-            files.getValue(MODULE_PATH),
-        )
-
         val static = renderStatic(document, instant, battery, resolvedMode)
         val mainLayers = document.activeLayers
             .filter(::isMainHand)
@@ -131,14 +127,12 @@ class WatchfaceBuilder(private val context: Context) {
         val manifest = JSONObject()
             .put("format", 3)
             .put("builder", "mosaic-link-android")
-            .put("template_id", "clock2-stock-binary-wf_clock23-visible-panel-434x494")
+            .put("template_id", "clock2-stock-binary-wf_clock23-410x494")
             .put("source_clock2_sha256", document.sourceSha256)
             .put("stock_native_sha256", PINNED_HASHES.getValue(
                 MODULE_PATH,
             ))
-            .put("output_native_sha256", WfClock23VisiblePanelPatch.OUTPUT_SHA256)
             .put("modified_paths", JSONArray(listOf(
-                MODULE_PATH,
                 "ex/installer_wf/wf_clock23_tn.bin",
                 "ex/resource/wf_clock23/wf_clock23_bg.bin",
                 "ex/resource/wf_clock23/wf_clock23_h.bin",
@@ -639,12 +633,7 @@ class WatchfaceBuilder(private val context: Context) {
             )
         }
         PINNED_HASHES.forEach { (path, stockHash) ->
-            val expected = if (path == MODULE_PATH) {
-                WfClock23VisiblePanelPatch.OUTPUT_SHA256
-            } else {
-                stockHash
-            }
-            check(files[path]?.sha256() == expected) { "Pinned byte changed: $path" }
+            check(files[path]?.sha256() == stockHash) { "Pinned byte changed: $path" }
         }
     }
 
