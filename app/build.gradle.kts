@@ -16,8 +16,8 @@ android {
         applicationId = "dev.toon.mosaiclink"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.3.0-experimental.1"
+        versionCode = 20
+        versionName = "0.4.0-xeos"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
