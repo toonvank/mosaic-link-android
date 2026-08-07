@@ -34,6 +34,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowForward
+import androidx.compose.material.icons.rounded.BatteryChargingFull
 import androidx.compose.material.icons.rounded.Bluetooth
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CloudUpload
@@ -212,6 +213,7 @@ class MainActivity : ComponentActivity() {
                             onInstall = viewModel::installConfirmed,
                             onCancelInstall = viewModel::cancelInstall,
                             onSaveToCatalog = viewModel::saveToCatalog,
+                            onCancelStuckDial = viewModel::cancelStuckDial,
                             modifier = Modifier.padding(padding)
                         )
                     }
@@ -275,6 +277,7 @@ private fun MosaicLinkContent(
     onInstall: () -> Unit,
     onCancelInstall: () -> Unit,
     onSaveToCatalog: () -> Unit,
+    onCancelStuckDial: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val filePicker = rememberLauncherForActivityResult(
@@ -334,6 +337,10 @@ private fun MosaicLinkContent(
             connected = state.connection is BleConnectionState.Connected,
             busy = state.busy,
             onSync = if (permissionsGranted) onSyncTime else onRequestPermissions,
+        )
+        RescueCard(
+            busy = state.busy,
+            onCancelStuckDial = if (permissionsGranted) onCancelStuckDial else onRequestPermissions,
         )
         WatchfaceCard(
             state = state,
@@ -495,6 +502,40 @@ private fun QuickTimeCard(connected: Boolean, busy: Boolean, onSync: () -> Unit)
             }
             OutlinedButton(onClick = onSync, enabled = !busy) {
                 Text("Sync now")
+            }
+        }
+    }
+}
+
+@Composable
+private fun RescueCard(busy: Boolean, onCancelStuckDial: () -> Unit) {
+    Card(
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f),
+        ),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(18.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Rounded.BatteryChargingFull,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.error,
+                modifier = Modifier.size(30.dp),
+            )
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Watch rescue", fontWeight = FontWeight.SemiBold)
+                Text(
+                    "Cancel a stuck dial transfer that drains battery",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            OutlinedButton(onClick = onCancelStuckDial, enabled = !busy) {
+                Text("Fix")
             }
         }
     }

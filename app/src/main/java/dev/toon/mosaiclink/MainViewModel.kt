@@ -257,6 +257,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun cancelStuckDial() {
+        viewModelScope.launch {
+            runBusy("Cancelling stuck dial state…") {
+                try {
+                    ensureConnected()
+                    ble.cancelCustomDial()
+                    log("Stuck dial state cancelled — battery drain should stop")
+                } finally {
+                    disconnectTransport()
+                }
+            }
+        }
+    }
+
     fun installConfirmed() {
         val clock2Face = mutableState.value.builtFace
         val xeosFace = mutableState.value.xeosResource
