@@ -294,13 +294,35 @@ class Hk8BleClient(private val context: Context) {
         packageBytes: ByteArray,
         onProgress: (UploadProgress) -> Unit,
     ) = withContext(Dispatchers.IO) {
+        uploadFiles(SiFliProtocol.filesFromZip(packageBytes), 0, onProgress)
+    }
+
+    /** Sends one native SiFli resource using the firmware's custom-resource type. */
+    suspend fun uploadXEOSResource(
+        fileName: String,
+        resourceBytes: ByteArray,
+        onProgress: (UploadProgress) -> Unit,
+    ) = withContext(Dispatchers.IO) {
+        val safeName = fileName.substringAfterLast('/').replace(Regex("[^A-Za-z0-9._-]"), "_")
+            .ifBlank { "xeos_resource.res" }
+        uploadFiles(
+            listOf(TransferFile("/$safeName", SiFliProtocol.align(resourceBytes))),
+            3,
+            onProgress,
+        )
+    }
+
+    private suspend fun uploadFiles(
+        files: List<TransferFile>,
+        type: Int,
+        onProgress: (UploadProgress) -> Unit,
+    ) {
         val activeGatt = requireNotNull(gatt) { "Watch is not connected" }
         activeGatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
         try {
-            val files = SiFliProtocol.filesFromZip(packageBytes)
             val total = files.sumOf { it.bytes.size.toLong() }
             var sent = 0L
-            val start = sendAndWait(SiFliProtocol.entireStart(total.toInt()), 1)
+            val start = sendAndWait(SiFliProtocol.entireStart(total.toInt(), type), 1)
             check(start.result == 0) { "Watch rejected transfer start (${start.result})" }
             var sliceSize = SiFliProtocol.DEFAULT_SLICE
             if (start.maxDataLength > 0) sliceSize = minOf(sliceSize, start.maxDataLength)

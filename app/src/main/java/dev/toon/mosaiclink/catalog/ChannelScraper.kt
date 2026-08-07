@@ -4,6 +4,7 @@ import android.util.Log
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.regex.Pattern
+import org.json.JSONObject
 
 data class ChannelConfig(
     val username: String,
@@ -18,7 +19,13 @@ data class ScrapedFace(
     val channelName: String,
     val messageId: Int,
     val description: String?,
+    val downloadUrl: String? = null,
+    val format: CatalogFaceFormat = CatalogFaceFormat.CLOCK2,
 )
+
+enum class CatalogFaceFormat { CLOCK2, XEOS_RESOURCE }
+
+private data class XEOSDevice(val model: String, val displayName: String)
 
 data class ScrapeResult(
     val faces: List<ScrapedFace>,
@@ -33,6 +40,9 @@ class ChannelScraper {
         private const val PAGE_SIZE = 20
         private const val USER_AGENT =
             "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.84 Mobile Safari/537.36"
+
+        private const val XEOS_HOST = "https://xeoswfmanager.netlify.app"
+        private const val XEOS_PAGE_SIZE = 1000
 
         val CHANNELS = listOf(
             ChannelConfig("ClockologyOfficial", "Clockology Official"),
@@ -58,6 +68,10 @@ class ChannelScraper {
         Pattern.compile("tgme_widget_message_text[^>]*>(.*?)</div>", Pattern.DOTALL)
     private val tagStripPattern =
         Pattern.compile("<[^>]+>")
+    private val xeosDevices = listOf(
+        XEOSDevice("508_42_9C_N1_Z2_D1_V01", "XEOS · HK8 508"),
+        XEOSDevice("501_42_9C_N1_Z2_D1_V01", "XEOS · HK8 501"),
+    )
 
     fun scrapeChannel(
         channel: ChannelConfig,
@@ -101,10 +115,53 @@ class ChannelScraper {
         return scrapeChannel(channel, randomBefore)
     }
 
+    /**
+     * Loads the public XEOS catalog. Its files are native SiFli resources rather
+     * than Clock2 documents, so callers must keep the format attached to every
+     * catalog item and use the dedicated resource-transfer path.
+     */
+    fun scrapeXEOS(): List<ScrapedFace> = xeosDevices.flatMap { device ->
+        val url = "$XEOS_HOST/api-proxy/good/getGoodListPublic?deviceModel=${device.model}" +
+            "&categoryId=0&page=1&pageSize=$XEOS_PAGE_SIZE"
+        val root = JSONObject(fetchUrl(url))
+        check(root.optInt("code", -1) == 0) { "XEOS catalog returned ${root.optString("msg", "an error")}" }
+        val items = root.optJSONObject("data")?.optJSONArray("list")
+            ?: return@flatMap emptyList()
+
+        buildList {
+            for (index in 0 until items.length()) {
+                val item = items.optJSONObject(index) ?: continue
+                val downloadUrl = item.optString("downloadUrl").takeIf { it.startsWith("https://") }
+                    ?: continue
+                val title = item.optString("title").ifBlank { item.optString("uid") }
+                    .ifBlank { "XEOS-${item.optInt("ID", index)}" }
+                val resolution = item.optString("resolution")
+                val description = item.optString("desc").ifBlank { null }
+                add(
+                    ScrapedFace(
+                        fileName = "$title.res",
+                        fileSizeText = resolution.takeIf { it.isNotBlank() }?.let { "Profile $it" }.orEmpty(),
+                        previewUrl = item.optString("pic").takeIf { it.startsWith("https://") },
+                        messageUrl = "$XEOS_HOST/?deviceModel=${device.model}&id=${item.optInt("ID", index)}",
+                        channelName = device.displayName,
+                        messageId = item.optInt("ID", index),
+                        description = description,
+                        downloadUrl = downloadUrl,
+                        format = CatalogFaceFormat.XEOS_RESOURCE,
+                    ),
+                )
+            }
+        }
+    }.distinctBy { it.downloadUrl }
+
     private fun fetchUrl(urlStr: String): String {
         val conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             setRequestProperty("User-Agent", USER_AGENT)
+            if (urlStr.startsWith(XEOS_HOST)) {
+                setRequestProperty("Referer", "$XEOS_HOST/")
+                setRequestProperty("Accept", "application/json, */*")
+            }
             connectTimeout = 15_000
             readTimeout = 20_000
         }

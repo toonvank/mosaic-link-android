@@ -103,11 +103,19 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
                         }
                     }
                 }.awaitAll()
-                if (results.all { it.error != null }) error("Could not reach Telegram's public catalog")
+                val channelResults = results
+                val xeosFaces = async(Dispatchers.IO) {
+                    runCatching { scraper.scrapeXEOS() }
+                        .onFailure { Log.w(TAG, "Could not load the XEOS catalog", it) }
+                        .getOrDefault(emptyList())
+                }.await()
+                if (channelResults.all { it.error != null } && xeosFaces.isEmpty()) {
+                    error("Could not reach the public watchface catalogs")
+                }
 
-                val deduped = interleave(results.map { it.faces })
+                val deduped = interleave(channelResults.map { it.faces } + listOf(xeosFaces))
                     .distinctBy { it.messageUrl }
-                val cursors = results.mapNotNull { batch ->
+                val cursors = channelResults.mapNotNull { batch ->
                     batch.cursor?.let { batch.channel.username to it }
                 }.toMap()
 
@@ -115,13 +123,13 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
                     it.copy(
                         channelFaces = deduped,
                         loading = false,
-                        hasMore = results.any { batch -> batch.hasMore },
+                        hasMore = channelResults.any { batch -> batch.hasMore },
                         scraped = true,
                     )
                 }
 
                 cacheChannelFaces(deduped, cursors)
-                Log.d(TAG, "Scraped ${deduped.size} faces from ${ChannelScraper.CHANNELS.size} channels")
+                Log.d(TAG, "Loaded ${deduped.size} faces from Telegram and XEOS")
             } catch (e: Exception) {
                 Log.e(TAG, "Scrape failed", e)
                 mutableState.update {
@@ -208,6 +216,10 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
                     channelName = obj.getString("channelName"),
                     messageId = obj.getInt("messageId"),
                     description = obj.optString("description").ifEmpty { null },
+                    downloadUrl = obj.optString("downloadUrl").ifEmpty { null },
+                    format = runCatching {
+                        CatalogFaceFormat.valueOf(obj.optString("format", CatalogFaceFormat.CLOCK2.name))
+                    }.getOrDefault(CatalogFaceFormat.CLOCK2),
                 ))
             }
             mutableState.update {
@@ -233,6 +245,8 @@ class CatalogViewModel(application: Application) : AndroidViewModel(application)
                 put("channelName", face.channelName)
                 put("messageId", face.messageId)
                 face.description?.let { put("description", it) }
+                face.downloadUrl?.let { put("downloadUrl", it) }
+                put("format", face.format.name)
             })
         }
         getApplication<Application>().getSharedPreferences(PREFS, 0)

@@ -169,7 +169,7 @@ class MainActivity : ComponentActivity() {
                                         fontWeight = FontWeight.SemiBold
                                     )
                                     Text(
-                                        if (currentScreen == "catalog") "Browse Telegram & remember" else "HK8 PRO MAX companion",
+                                        if (currentScreen == "catalog") "Browse Telegram, XEOS & history" else "HK8 PRO MAX companion",
                                         style = MaterialTheme.typography.labelMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -188,6 +188,14 @@ class MainActivity : ComponentActivity() {
                                 val bytes = catalogViewModel.loadFaceBytes(face) ?: return@CatalogScreen
                                 viewModel.selectClock2FromCatalog(face.fileName, bytes)
                                 viewModel.setScreen("installer")
+                            },
+                            onInstallXEOSResource = { face ->
+                                val downloadUrl = face.downloadUrl ?: return@CatalogScreen
+                                viewModel.prepareXEOSResource(
+                                    displayName = face.fileName.removeSuffix(".res"),
+                                    downloadUrl = downloadUrl,
+                                    previewUrl = face.previewUrl,
+                                )
                             },
                             modifier = Modifier.padding(padding)
                         )
@@ -283,10 +291,12 @@ private fun MosaicLinkContent(
                 Text(
                     "On the watch, select a different official stock face and leave " +
                         "the screen awake. Also close Wearfit so it does not compete " +
-                        "for the Bluetooth connection.\n\nThis local experiment patches " +
-                        "the official face-23 display geometry from 410×494 to the " +
-                        "XDA-measured 434×494 visible area. Keep the known-good " +
-                        "stock face available for recovery.",
+                        "for the Bluetooth connection." +
+                        if (state.xeosResource != null) {
+                            " This XEOS .res file will use the experimental native-resource transfer route."
+                        } else {
+                            ""
+                        },
                 )
             },
             confirmButton = {
@@ -511,13 +521,15 @@ private fun WatchfaceCard(
                 )
                 Spacer(Modifier.width(10.dp))
                 Text(
-                    "Clock2 installer",
+                    "Watchface installer",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.Bold,
                 )
             }
 
-            state.builtFace?.let { face ->
+            when {
+                state.builtFace != null -> {
+                    val face = state.builtFace!!
                 val bitmap = remember(face.previewPng) {
                     BitmapFactory.decodeByteArray(
                         face.previewPng, 0, face.previewPng.size,
@@ -575,7 +587,56 @@ private fun WatchfaceCard(
                         }
                     }
                 }
-            } ?: run {
+                }
+                state.xeosResource != null -> {
+                    val face = state.xeosResource!!
+                    val bitmap = remember(face.previewPng) {
+                        face.previewPng?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(width = 126.dp, height = 136.dp)
+                                .clip(RoundedCornerShape(24.dp))
+                                .background(Color.Black),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            if (bitmap != null) {
+                                Image(
+                                    bitmap = bitmap.asImageBitmap(),
+                                    contentDescription = "XEOS watchface preview",
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                            } else {
+                                Icon(Icons.Rounded.Watch, null, Modifier.size(42.dp), Color.Gray)
+                            }
+                        }
+                        Spacer(Modifier.width(16.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                face.displayName,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                            Spacer(Modifier.height(6.dp))
+                            StatusPill("XEOS resource • experimental", false)
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                "Native .res • direct SiFli transfer",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                "Not converted from Clock2",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+                else -> {
                 Surface(
                     shape = RoundedCornerShape(22.dp),
                     color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
@@ -601,6 +662,7 @@ private fun WatchfaceCard(
                             )
                         }
                     }
+                }
                 }
             }
 
@@ -644,14 +706,14 @@ private fun WatchfaceCard(
                 }
                 Button(
                     onClick = onInstall,
-                    enabled = state.builtFace != null &&
+                    enabled = (state.builtFace != null || state.xeosResource != null) &&
                         state.connection is BleConnectionState.Connected &&
                         !state.busy,
                     modifier = Modifier.weight(1f),
                 ) {
                     Text(
                         if (
-                            state.builtFace != null &&
+                            (state.builtFace != null || state.xeosResource != null) &&
                             state.connection !is BleConnectionState.Connected
                         ) "Connect first" else "Install",
                     )

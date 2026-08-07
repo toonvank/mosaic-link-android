@@ -25,10 +25,10 @@ internal object SiFliProtocol {
     const val MTU_CAP = 247
     const val DEFAULT_SLICE = 4096
 
-    fun entireStart(totalBytes: Int): ByteArray = request(
+    fun entireStart(totalBytes: Int, type: Int = 0): ByteArray = request(
         0,
         ByteBuffer.allocate(7).order(ByteOrder.LITTLE_ENDIAN)
-            .putShort(0)
+            .putShort(type.toShort())
             .put(PHONE_TYPE.toByte())
             .putInt(totalBytes)
             .array(),

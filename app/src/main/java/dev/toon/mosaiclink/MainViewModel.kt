@@ -28,6 +28,17 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.ZonedDateTime
 import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
+import java.security.MessageDigest
+
+data class XEOSResourceWatchface(
+    val displayName: String,
+    val fileName: String,
+    val resourceBytes: ByteArray,
+    val previewPng: ByteArray?,
+    val sourceSha256: String,
+)
 
 data class MosaicUiState(
     val connection: BleConnectionState = BleConnectionState.Disconnected,
@@ -35,6 +46,7 @@ data class MosaicUiState(
     val document: Clock2Document? = null,
     val compatibility: Compatibility? = null,
     val builtFace: BuiltWatchface? = null,
+    val xeosResource: XEOSResourceWatchface? = null,
     val scaleMode: ScaleMode = ScaleMode.CONTAIN,
     val phase: String? = null,
     val uploadProgress: UploadProgress? = null,
@@ -47,13 +59,6 @@ data class MosaicUiState(
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
-    companion object {
-        private const val LAST_CLOCK2 = "last.clock2"
-        private const val PREFS = "mosaic_link"
-        private const val LAST_FILE_NAME = "last_file_name"
-        private const val LAST_DEVICE_ADDRESS = "last_device_address"
-        private const val LAST_DEVICE_NAME = "last_device_name"
-    }
 
     private val ble = Hk8BleClient(application)
     private val builder = WatchfaceBuilder(application)
@@ -133,6 +138,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 document = document,
                 compatibility = compatibility,
                 builtFace = null,
+                xeosResource = null,
                 uploadProgress = null,
             )
         }
@@ -252,7 +258,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun installConfirmed() {
-        val face = mutableState.value.builtFace ?: return
+        val clock2Face = mutableState.value.builtFace
+        val xeosFace = mutableState.value.xeosResource
+        if (clock2Face == null && xeosFace == null) return
         if (mutableState.value.connection !is BleConnectionState.Connected) {
             mutableState.update { it.copy(error = "Connect to the watch before installing") }
             log("Install blocked — connect to the watch first")
@@ -261,20 +269,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         installJob = viewModelScope.launch {
             runBusy("Preparing safe transfer…") {
                 try {
-                    updatePhase("Installing ${face.displayName}…")
+                    val displayName = clock2Face?.displayName ?: requireNotNull(xeosFace).displayName
+                    updatePhase("Installing $displayName…")
                     log("Transfer started — keep the watch awake")
-                    ble.uploadWatchface(face.packageBytes) { progress ->
-                        BleForegroundService.update(
-                            getApplication(),
-                            "Sending ${progress.fileName} (${progress.fileIndex}/${progress.fileCount})",
-                        )
-                        mutableState.update {
-                            it.copy(uploadProgress = progress, phase = "Sending ${progress.fileName}")
+                    when {
+                        clock2Face != null -> ble.uploadWatchface(clock2Face.packageBytes) { progress ->
+                            BleForegroundService.update(
+                                getApplication(),
+                                "Sending ${progress.fileName} (${progress.fileIndex}/${progress.fileCount})",
+                            )
+                            mutableState.update {
+                                it.copy(uploadProgress = progress, phase = "Sending ${progress.fileName}")
+                            }
+                        }
+                        xeosFace != null -> ble.uploadXEOSResource(xeosFace.fileName, xeosFace.resourceBytes) { progress ->
+                            mutableState.update {
+                                it.copy(uploadProgress = progress, phase = "Sending ${progress.fileName}")
+                            }
                         }
                     }
                     mutableState.update { it.copy(uploadProgress = null) }
-                    runCatching { withContext(Dispatchers.IO) { rememberCurrentFace() } }
-                        .onFailure { log("Installed, but history could not be updated") }
+                    if (clock2Face != null) {
+                        runCatching { withContext(Dispatchers.IO) { rememberCurrentFace() } }
+                            .onFailure { log("Installed, but history could not be updated") }
+                    }
                     log("Transfer accepted — press Home once to open the new face")
                 } catch (error: Exception) {
                     runCatching { ble.cancelCustomDial() }
@@ -354,6 +372,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             runBusy("Loading from catalog…") {
                 processClock2(fileName, bytes, persist = true)
+            }
+        }
+    }
+
+    fun prepareXEOSResource(
+        displayName: String,
+        downloadUrl: String,
+        previewUrl: String?,
+    ) {
+        viewModelScope.launch {
+            runBusy("Downloading XEOS resource…") {
+                val resourceBytes = withContext(Dispatchers.IO) {
+                    downloadXEOSFile(downloadUrl, MAX_XEOS_RESOURCE_BYTES)
+                }
+                require(resourceBytes.size >= 32 && resourceBytes.copyOfRange(0, 4).contentEquals(XEOS_MAGIC)) {
+                    "Downloaded file is not a recognized XEOS SiFli resource"
+                }
+                val previewBytes = previewUrl?.let { url ->
+                    runCatching {
+                        withContext(Dispatchers.IO) { downloadXEOSFile(url, MAX_XEOS_PREVIEW_BYTES) }
+                    }.getOrNull()
+                }
+                val resourceName = downloadUrl.substringAfterLast('/').ifBlank { "$displayName.res" }
+                mutableState.update {
+                    it.copy(
+                        selectedFileName = "$displayName.res",
+                        document = null,
+                        compatibility = null,
+                        builtFace = null,
+                        xeosResource = XEOSResourceWatchface(
+                            displayName = displayName,
+                            fileName = resourceName,
+                            resourceBytes = resourceBytes,
+                            previewPng = previewBytes,
+                            sourceSha256 = resourceBytes.sha256(),
+                        ),
+                        uploadProgress = null,
+                        currentScreen = "installer",
+                    )
+                }
+                log("Downloaded XEOS resource $displayName — ready for direct transfer")
             }
         }
     }
@@ -451,6 +510,54 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         mutableState.update {
             it.copy(activity = (listOf(message) + it.activity).take(8))
         }
+    }
+
+    private fun downloadXEOSFile(url: String, maxBytes: Int): ByteArray {
+        require(url.startsWith("https://file.hellowatch.com/")) { "Unexpected XEOS download host" }
+        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 15_000
+            readTimeout = 30_000
+            setRequestProperty("User-Agent", XEOS_USER_AGENT)
+            setRequestProperty("Referer", "https://xeoswfmanager.netlify.app/")
+        }
+        try {
+            check(connection.responseCode in 200..299) { "XEOS download failed (HTTP ${connection.responseCode})" }
+            check(connection.contentLengthLong <= maxBytes || connection.contentLengthLong < 0) {
+                "XEOS download is too large"
+            }
+            return connection.inputStream.use { input ->
+                val output = java.io.ByteArrayOutputStream()
+                val buffer = ByteArray(DEFAULT_DOWNLOAD_BUFFER)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    check(output.size() + read <= maxBytes) { "XEOS download is too large" }
+                    output.write(buffer, 0, read)
+                }
+                output.toByteArray()
+            }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun ByteArray.sha256(): String = MessageDigest.getInstance("SHA-256")
+        .digest(this)
+        .joinToString("") { "%02x".format(it) }
+
+    companion object {
+        private const val LAST_CLOCK2 = "last.clock2"
+        private const val PREFS = "mosaic_link"
+        private const val LAST_FILE_NAME = "last_file_name"
+        private const val LAST_DEVICE_ADDRESS = "last_device_address"
+        private const val LAST_DEVICE_NAME = "last_device_name"
+        private val XEOS_MAGIC = byteArrayOf(0x53, 0x62, 0x40, 0x2a)
+        private const val MAX_XEOS_RESOURCE_BYTES = 8 * 1024 * 1024
+        private const val MAX_XEOS_PREVIEW_BYTES = 4 * 1024 * 1024
+        private const val DEFAULT_DOWNLOAD_BUFFER = 16 * 1024
+        private const val XEOS_USER_AGENT =
+            "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.6533.84 Mobile Safari/537.36"
     }
 
     override fun onCleared() {

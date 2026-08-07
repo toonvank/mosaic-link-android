@@ -92,6 +92,7 @@ private enum class CatalogPage { Browse, Installed }
 fun CatalogScreen(
     viewModel: CatalogViewModel,
     onLoadSavedFace: (SavedFace) -> Unit,
+    onInstallXEOSResource: (ScrapedFace) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val state by viewModel.state.collectAsState()
@@ -120,7 +121,13 @@ fun CatalogScreen(
             onDismissRequest = { detailFace = null },
             sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         ) {
-            FaceDetailSheet(face = face)
+            FaceDetailSheet(
+                face = face,
+                onInstallXEOSResource = {
+                    detailFace = null
+                    onInstallXEOSResource(face)
+                },
+            )
         }
     }
 
@@ -575,7 +582,10 @@ private fun InlineMessage(
 }
 
 @Composable
-private fun FaceDetailSheet(face: ScrapedFace) {
+private fun FaceDetailSheet(
+    face: ScrapedFace,
+    onInstallXEOSResource: () -> Unit,
+) {
     val context = LocalContext.current
     Column(
         Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, bottom = 32.dp),
@@ -611,17 +621,31 @@ private fun FaceDetailSheet(face: ScrapedFace) {
             Text(it, style = MaterialTheme.typography.bodyMedium, maxLines = 3, overflow = TextOverflow.Ellipsis)
         }
         Spacer(Modifier.height(20.dp))
-        Button(onClick = { openTelegramPost(context, face.messageUrl) }, modifier = Modifier.fillMaxWidth()) {
-            Icon(Icons.AutoMirrored.Rounded.OpenInNew, contentDescription = null)
-            Spacer(Modifier.width(8.dp))
-            Text("Open exact post in Telegram")
+        if (face.format == CatalogFaceFormat.XEOS_RESOURCE && face.downloadUrl != null) {
+            Button(onClick = onInstallXEOSResource, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.Rounded.Watch, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Download and prepare install")
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Native XEOS resource: its catalog preview stays in Mosaic Link. Installation uses the experimental SiFli resource route for this HK8 profile.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        } else {
+            Button(onClick = { openTelegramPost(context, face.messageUrl) }, modifier = Modifier.fillMaxWidth()) {
+                Icon(Icons.AutoMirrored.Rounded.OpenInNew, contentDescription = null)
+                Spacer(Modifier.width(8.dp))
+                Text("Open exact post in Telegram")
+            }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Telegram only exposes the preview publicly. Download the file there, then open or share it with Mosaic Link.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "Telegram only exposes the preview publicly. Download the file there, then open or share it with Mosaic Link.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
     }
 }
 

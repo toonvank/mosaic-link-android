@@ -61,6 +61,10 @@ choice are no longer exposed in the UI.
 
 - **Input:** Apple Clock2 `.clock2` files, limited to the layer types that the
   compatibility checker accepts. It is not a general Clock2 renderer.
+- **Catalog source:** the public XEOS HK8 `508` and `501` feeds are shown with
+  their supplied image previews. Their downloaded `.res` files use a separate,
+  explicitly experimental SiFli custom-resource transfer path; they are not
+  converted to Clock2 and do not alter the verified Clock2 donor-module flow.
 - **Watch profile:** HK8 PRO MAX, equipment code `6167`, firmware `2.09`, using
   the SiFli BLE service and the official `wf_clock23` donor module.
 - **Stable display profile:** a 410 × 494 watchface viewport.

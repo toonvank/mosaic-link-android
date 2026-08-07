@@ -28,6 +28,14 @@ class SiFliProtocolTest {
     }
 
     @Test
+    fun resourceTransferUsesSifliCustomResourceType() {
+        assertEquals(
+            "0000070003000240e20100",
+            SiFliProtocol.entireStart(123456, type = 3).hex(),
+        )
+    }
+
+    @Test
     fun alignmentUsesCrc32Mpeg2() {
         assertEquals("ffffffff", SiFliProtocol.align(byteArrayOf()).hex())
         assertEquals(
