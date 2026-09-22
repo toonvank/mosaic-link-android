@@ -58,27 +58,25 @@ Apple Watch services have become live HK8 complications.
   install begins.
 - BLE errors stop the transfer; there is no factory-reset feature.
 
-## Local prototype dependency
+## Externally sourced binary dependencies
 
-SiFli eZip image encoding is performed by the Android ARMv7 encoder from the
-locally inspected Wearfit package. This prototype is for personal device
-testing. The binary is not claimed as original Mosaic Link code and should not
-be redistributed without establishing its license. All application code and
-UI are original.
+Two files in this repository are **not original Mosaic Link code** and are
+**not covered by the MIT license**:
 
-## Repository visibility
+- `app/src/main/jniLibs/armeabi-v7a/libezip.so` — the SiFli eZip image
+  encoder extracted from the Wearfit package for personal device testing;
+- `app/src/main/assets/stock_wf_clock23.zip` — the official stock watchface
+  package used as a donor.
 
-Keep this repository **private in its current form**. A public push would also
-publish these externally sourced binary dependencies:
+They are the property of their respective owners (SiFli / Wearfit) and are
+included here as-is for personal-device interoperability testing. All
+application code and UI are original and MIT-licensed.
 
-- `app/src/main/jniLibs/armeabi-v7a/libezip.so`;
-- `app/src/main/assets/stock_wf_clock23.zip`.
+## License
 
-Before making the project public, either obtain redistribution permission for
-both files or remove them from version control and require each user to import
-their own legally obtained copies locally. The application source can then be
-published under a chosen license without implying that the two binary
-dependencies share that license.
+The application source code is licensed under the MIT license — see
+[LICENSE](LICENSE). The binary dependencies listed above are excluded from
+this license and remain the property of their owners.
 
 ## Continuous integration
 
